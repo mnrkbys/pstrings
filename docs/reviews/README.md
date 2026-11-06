@@ -13,6 +13,7 @@
 | CR-004 | Code Review | CA-001 | Codex | CR-003 | 376d1de1 | 9097d0c8 | 2026-11-06 | [CR-004.md](CR-004.md) |
 | CR-005 | Code Review | CA-001 | Codex | CR-004 | 376d1de1 | bb46f60f | 2026-11-06 | [CR-005.md](CR-005.md) |
 | CR-006 | Code Review | CA-001 | Codex | CR-005 | 472d940f | afd94f86 | 2026-11-06 | [CR-006.md](CR-006.md) |
+| CR-007 | Code Review | CA-001 | Codex | CR-006 | afd94f86 | f2902479 | 2026-11-06 | [CR-007.md](CR-007.md) |
 
 ## Findings
 
@@ -21,7 +22,7 @@
 | F-0001 | CA-001 | — | — | — | Code;Test | P1 | Ready for Integration | — | `fix/F-0001-preserve-input` | 08e4ff527b873973365f2369045d0c20fa7c1f1d | 入力と同じ実体への出力で入力を切り詰める | 08e4ff52 | CR-002 passed at the exact branch target; same-file protection preserves input bytes for path and link aliases. |
 | F-0002 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 保留レコードより後の結果を先に出しオフセット順を崩す | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
 | F-0003 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 符号化ごとでない境界判定が文字列を欠落・分割させる | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
-| F-0004 | CA-001 | — | — | — | Code;Test | P1 | Open | — | — | — | チャンク内だけの UTF-16LE 偶奇選別が正しい末尾を捨てる | — | チャンク幅 8 で「あいうえお」が「あいうえ」になる。 |
+| F-0004 | CA-001 | — | — | — | Code;Test | P1 | Ready for Integration | — | `fix/F-0004-global-utf16-parity` | f29024795fc6335c644c1ac806970018b4306018 | チャンク内だけの UTF-16LE 偶奇選別が正しい末尾を捨てる | f2902479 | CR-007 passed at the exact target after F-0006; complete-run parity selection preserves tested UTF-16LE tails. |
 | F-0005 | CA-001 | — | — | — | Code;Test | P2 | Ready for Integration | — | `fix/F-0005-bound-inflight-chunks` | 3da034e5af0de1dd45bbdd24c8c3d5ea63a517e3 | 先行完了チャンクを無制限に保持し FD を使い切る | 3da034e5 | CR-003 passed at the exact branch target; the low-file-descriptor regression succeeds with one and four workers. |
 | F-0006 | CA-001 | — | — | F-0004 | Code;Test | P2 | Ready for Integration | — | `fix/F-0006-bounded-records` | afd94f86ff493f259a7de1c75d2f6600a6b5202d | 長い run の境界連結が入力全体をメモリへ蓄積する | afd94f86 | CR-006 passed at the exact target after its F-0002/F-0003 prerequisites; F-0004 remains downstream. |
 | F-0007 | CA-001 | — | — | — | Code;Test | P2 | Ready for Integration | — | `fix/F-0007-odd-length-input` | 9097d0c8122134a268d5f00b80a6085541c658f7 | 入力長へのクランプで偶数のチャンク指定を誤って拒否する | 9097d0c8 | CR-004 passed at the exact branch target; odd-length input accepts valid even chunk widths. |
@@ -31,7 +32,7 @@
 
 | Campaign | Integration Branch | State | Frozen Base | Last Integrated Target | History / Notes |
 | --- | --- | --- | --- | --- | --- |
-| CA-001 | — | Active | — | — | CR-001–CR-006 approved F-0001 through F-0003 and F-0005 through F-0008 at exact branch targets; F-0004 review and integration are pending. |
+| CA-001 | — | Active | — | — | CR-001–CR-007 approved F-0001–F-0008 at exact branch targets; integration import and Integration Range review are pending. |
 
 ## Integrated Branches
 
