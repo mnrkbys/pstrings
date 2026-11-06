@@ -315,6 +315,11 @@ fn run_output_stage(
     let mut pending_files = BTreeMap::<u64, (ChunkResult, ChunkPermit)>::new();
     let mut next_output_chunk = 0u64;
     let mut pending_output = OutputState::new(cfg.temp_dir().clone());
+    if cfg.encodings().contains(&InputEncoding::Utf16le)
+        && cfg.encodings().contains(&InputEncoding::Utf16leAscii)
+    {
+        pending_output.merge_repeated_lines();
+    }
     let output_started = Instant::now();
     let mut output_processing = Duration::ZERO;
     let mut output_error: Option<io::Error> = None;

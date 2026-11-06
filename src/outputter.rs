@@ -9,7 +9,7 @@ use crate::record_queue::RecordQueue;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -101,10 +101,10 @@ impl View {
     }
 
     /// Decides whether `record` is output, cutting it and moving it to its
-    /// printed offset if so.
-    fn admit(&self, record: &mut MatchRecord, min_cch: u64, cut: &mut u64) -> io::Result<bool> {
+    /// printed offset if so. Says whether the record reached the stop.
+    fn admit(&self, record: &mut MatchRecord, min_cch: u64) -> io::Result<Option<bool>> {
         if !self.owns(record.offset) {
-            return Ok(false);
+            return Ok(None);
         }
         let end = record.offset + record.cb;
         if end > self.stop {
@@ -113,12 +113,47 @@ impl View {
             };
             record.cch = data.cut_utf16_text(self.stop - record.offset)?;
             if record.cch < min_cch {
-                return Ok(false);
+                return Ok(None);
             }
         }
-        *cut += u64::from(self.reaches_stop(record.encoding, end));
         record.offset += self.base;
-        Ok(true)
+        Ok(Some(self.reaches_stop(record.encoding, end)))
+    }
+}
+
+/// Merges lines that would repeat one another. `scanner::utf16le` and
+/// `scanner::utf16le_ascii` are the two encodings sharing a label, so when
+/// both run they can print the same string at the same offset. Output is
+/// sorted by offset, so only the current offset's lines are kept.
+#[derive(Default)]
+struct SeenLines {
+    active: bool,
+    offset: u64,
+    texts: Vec<RecordData>,
+}
+
+impl SeenLines {
+    fn repeats(
+        &mut self,
+        offset: u64,
+        encoding: InputEncoding,
+        text: &RecordData,
+        dir: Option<&Path>,
+    ) -> io::Result<bool> {
+        if !self.active || !matches!(encoding, InputEncoding::Utf16le | InputEncoding::Utf16leAscii) {
+            return Ok(false);
+        }
+        if offset != self.offset {
+            self.offset = offset;
+            self.texts.clear();
+        }
+        for seen in &self.texts {
+            if seen.same_payload(text)? {
+                return Ok(true);
+            }
+        }
+        self.texts.push(text.retained_text(dir)?);
+        Ok(false)
     }
 }
 
@@ -133,6 +168,7 @@ pub struct OutputState {
     temp_dir: Option<PathBuf>,
     view: View,
     cut: u64,
+    seen: SeenLines,
 }
 
 impl OutputState {
@@ -146,6 +182,12 @@ impl OutputState {
     /// Sets what the following chunks' strings are measured against.
     pub fn set_view(&mut self, view: View) {
         self.view = view;
+    }
+
+    /// Merges lines repeating one another. Needed when the two encodings
+    /// sharing a label go to the same output.
+    pub fn merge_repeated_lines(&mut self) {
+        self.seen.active = true;
     }
 
     /// How many output strings were stopped by the end of the view.
@@ -279,7 +321,15 @@ impl OutputState {
             let encoding = InputEncoding::try_from(key.1)?;
             let queue = self.ready.get_mut(&encoding).unwrap();
             let mut record = queue.pop()?;
-            if self.view.admit(&mut record, min_cch, &mut self.cut)? {
+            if let Some(reached_stop) = self.view.admit(&mut record, min_cch)?
+                && !self.seen.repeats(
+                    record.offset,
+                    record.encoding,
+                    &record.data,
+                    self.temp_dir.as_deref(),
+                )?
+            {
+                self.cut += u64::from(reached_stop);
                 write_output_record(out, &record, str_only, &mut scratch)?;
             }
             drop(record);
@@ -356,12 +406,22 @@ pub fn output_merged_chunk(
             if let RecordDataRef::Text(text) = raw.data {
                 state.emit_before(input_bound, min_cch, out, str_only)?;
                 if state.ready_key().is_none_or(|key| key >= input_bound) {
-                    if raw.cch >= min_cch && state.view.owns(raw.offset) {
+                    let offset = state.view.base + raw.offset;
+                    if raw.cch >= min_cch
+                        && state.view.owns(raw.offset)
+                        && !(state.seen.active
+                            && state.seen.repeats(
+                                offset,
+                                raw.encoding,
+                                &RecordData::Text(text.to_owned()),
+                                state.temp_dir.as_deref(),
+                            )?)
+                    {
                         let end = raw.offset + raw.cb;
                         state.cut += u64::from(state.view.reaches_stop(raw.encoding, end));
                         write_output_record_str(
                             out,
-                            state.view.base + raw.offset,
+                            offset,
                             raw.encoding,
                             text,
                             str_only,
@@ -425,6 +485,51 @@ pub fn flush_pending(
     }
     state.pending.clear(); // incomplete final code units have no continuation
     state.emit_before((u64::MAX, u16::MAX), min_cch, out, str_only)
+}
+
+#[cfg(test)]
+mod seen_lines_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_repeating_any_earlier_line_at_its_offset_is_found() {
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let mut repeats = |offset, text: &str| {
+            let text = RecordData::Text(text.into());
+            seen.repeats(offset, InputEncoding::Utf16le, &text, None).unwrap()
+        };
+        assert!(!repeats(7, "A"));
+        assert!(!repeats(7, "B"));
+        assert!(repeats(7, "A"));
+        assert!(repeats(7, "B"));
+        assert!(!repeats(8, "A"));
+    }
+
+    #[test]
+    fn other_encodings_are_left_alone() {
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let text = RecordData::Text("A".into());
+        assert!(!seen.repeats(7, InputEncoding::Ascii, &text, None).unwrap());
+        assert!(!seen.repeats(7, InputEncoding::Ascii, &text, None).unwrap());
+    }
+
+    #[test]
+    fn long_texts_are_kept_and_compared_on_disk() {
+        let long = "A".repeat(crate::payload::MEMORY_LIMIT + 1);
+        let mut first = RecordData::Text(long.clone());
+        first.spill(None).unwrap();
+        let mut other = RecordData::Text(long.clone() + "B");
+        other.spill(None).unwrap();
+        let mut same = RecordData::Text(long.clone());
+        same.spill(None).unwrap();
+
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let encoding = InputEncoding::Utf16le;
+        assert!(!seen.repeats(7, encoding, &first, None).unwrap());
+        assert!(matches!(seen.texts[0], RecordData::Spilled(_)));
+        assert!(!seen.repeats(7, encoding, &other, None).unwrap());
+        assert!(seen.repeats(7, encoding, &same, None).unwrap());
+    }
 }
 
 fn owned_from_raw_record(rec: &crate::record::RawRecord<'_>) -> MatchRecord {

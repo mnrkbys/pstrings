@@ -97,6 +97,53 @@ impl RecordData {
         }
     }
 
+    fn read_payload_at(&self, buf: &mut [u8], pos: u64) -> io::Result<()> {
+        let bytes = match self {
+            Self::Text(s) => s.as_bytes(),
+            Self::Raw(b) => b,
+            Self::Spilled(s) => return crate::scanner::read_exact_at(&s.file, buf, s.start + pos),
+        };
+        buf.copy_from_slice(&bytes[pos as usize..pos as usize + buf.len()]);
+        Ok(())
+    }
+
+    /// Compares payloads a block at a time, as either may be spilled.
+    pub fn same_payload(&self, other: &Self) -> io::Result<bool> {
+        let len = self.payload_len();
+        if len != other.payload_len() {
+            return Ok(false);
+        }
+        let size = len.min(64 * 1024) as usize;
+        let (mut a, mut b) = (vec![0; size], vec![0; size]);
+        let mut pos = 0;
+        while pos < len {
+            let block = (len - pos).min(size as u64) as usize;
+            self.read_payload_at(&mut a[..block], pos)?;
+            other.read_payload_at(&mut b[..block], pos)?;
+            if a[..block] != b[..block] {
+                return Ok(false);
+            }
+            pos += block as u64;
+        }
+        Ok(true)
+    }
+
+    /// A copy of decoded text that outlives the queue a popped record's
+    /// payload points into, within the same memory limit as any payload.
+    pub fn retained_text(&self, dir: Option<&Path>) -> io::Result<Self> {
+        if self.payload_len() > MEMORY_LIMIT as u64 {
+            let mut file = temporary_file(dir)?;
+            self.write_payload(&mut file)?;
+            let (len, ascii) = (self.payload_len(), self.is_ascii());
+            return Ok(Self::Spilled(Spilled { file, start: 0, len, raw: false, ascii }));
+        }
+        let mut bytes = Vec::with_capacity(self.payload_len() as usize);
+        self.write_payload(&mut bytes)?;
+        String::from_utf8(bytes)
+            .map(Self::Text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
     pub fn spill(&mut self, dir: Option<&Path>) -> io::Result<()> {
         if matches!(self, Self::Spilled(_)) || self.payload_len() <= MEMORY_LIMIT as u64 {
             return Ok(());
