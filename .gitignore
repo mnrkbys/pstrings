@@ -1,3 +1,10 @@
 /target
 Cargo.lock
 .vs/
+AGENTS.md
+CLAUDE.md
+.agents/
+.githooks/
+.claude/
+.github/instructions/
+.github/copilot-instructions.md
