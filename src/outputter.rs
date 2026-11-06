@@ -68,6 +68,35 @@ fn note_emitted(encoding: InputEncoding) {
     }
 }
 
+/// Where output lines go, by encoding.
+pub trait Sink {
+    fn for_encoding(&mut self, encoding: InputEncoding) -> &mut dyn Write;
+    fn flush_all(&mut self) -> io::Result<()>;
+}
+
+impl<W: Write> Sink for W {
+    fn for_encoding(&mut self, _encoding: InputEncoding) -> &mut dyn Write {
+        self
+    }
+
+    fn flush_all(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
+
+/// One output per encoding, for `-o` with `{encoding}`.
+pub struct OutputPerEncoding(pub HashMap<InputEncoding, Box<dyn Write>>);
+
+impl Sink for OutputPerEncoding {
+    fn for_encoding(&mut self, encoding: InputEncoding) -> &mut dyn Write {
+        self.0.get_mut(&encoding).expect("an output for every selected encoding")
+    }
+
+    fn flush_all(&mut self) -> io::Result<()> {
+        self.0.values_mut().try_for_each(|output| output.flush())
+    }
+}
+
 /// Which of the scanned strings are output, and where. The scan reports offsets
 /// from the start of what it was given; every field but `base` uses those.
 #[derive(Clone, Copy, Debug)]
@@ -311,7 +340,7 @@ impl OutputState {
         &mut self,
         bound: (u64, u16),
         min_cch: u64,
-        out: &mut impl Write,
+        out: &mut impl Sink,
         str_only: bool,
     ) -> io::Result<()> {
         self.resolve_parities(bound.0)?;
@@ -330,7 +359,7 @@ impl OutputState {
                 )?
             {
                 self.cut += u64::from(reached_stop);
-                write_output_record(out, &record, str_only, &mut scratch)?;
+                write_output_record(&mut out.for_encoding(record.encoding), &record, str_only, &mut scratch)?;
             }
             drop(record);
             queue.reset_if_empty()?;
@@ -367,7 +396,7 @@ pub fn output_merged_chunk(
     chunk_len: u64,
     state: &mut OutputState,
     min_cch: u64,
-    out: &mut impl Write,
+    out: &mut impl Sink,
     str_only: bool,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
@@ -420,7 +449,7 @@ pub fn output_merged_chunk(
                         let end = raw.offset + raw.cb;
                         state.cut += u64::from(state.view.reaches_stop(raw.encoding, end));
                         write_output_record_str(
-                            out,
+                            &mut out.for_encoding(raw.encoding),
                             offset,
                             raw.encoding,
                             text,
@@ -477,7 +506,7 @@ pub fn output_merged_chunk(
 pub fn flush_pending(
     state: &mut OutputState,
     min_cch: u64,
-    out: &mut impl Write,
+    out: &mut impl Sink,
     str_only: bool,
 ) -> io::Result<()> {
     for (_, rec) in std::mem::take(&mut state.pending) {

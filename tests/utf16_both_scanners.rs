@@ -10,7 +10,12 @@ fn run(bytes: &[u8], options: &[&str]) -> Output {
 
 fn lines(output: &Output) -> Vec<String> {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    String::from_utf8(output.stdout.clone()).unwrap().split_inclusive('\n').map(str::to_owned).collect()
+    String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .replace("\r\n", "\n")
+        .split_inclusive('\n')
+        .map(str::to_owned)
+        .collect()
 }
 
 fn utf16(text: &str) -> Vec<u8> {

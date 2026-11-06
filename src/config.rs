@@ -17,8 +17,10 @@ pub struct Args {
     #[arg(short = 's', long = "string-only", action = clap::ArgAction::SetTrue, default_value_t = false)]
     str_only: bool,
 
-    /// Output file. [default: stdout].
-    #[arg(short = 'o', long = "output")]
+    /// Output file. [default: stdout]. A path containing {encoding} is a
+    /// template: each encoding goes to its own file, named by replacing
+    /// {encoding} with its -e name, as if extracted on its own.
+    #[arg(short = 'o', long = "output", verbatim_doc_comment)]
     output: Option<PathBuf>,
 
     /// Input encoding(s). Repeat the option or comma-separate to select

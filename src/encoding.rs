@@ -118,6 +118,15 @@ impl InputEncoding {
         }
     }
 
+    /// The name `-e` selects this encoding by. Unlike `name`, it tells
+    /// `Utf16le` and `Utf16leAscii` apart.
+    pub fn cli_name(self) -> String {
+        self.to_possible_value()
+            .expect("no encoding is skipped")
+            .get_name()
+            .to_owned()
+    }
+
     /// The most bytes a scanner can leave unused at the end of its input
     /// because they do not complete a character, plus one: a run that stops
     /// this close to the end may have been cut there.

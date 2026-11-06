@@ -92,6 +92,29 @@ fn install_cancel_handler() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error
     Ok(cancelled)
 }
 
+/// The placeholder that makes `-o` a template for one file per encoding.
+const ENCODING_PLACEHOLDER: &str = "{encoding}";
+
+/// The per-encoding outputs, if `-o` is a template.
+fn make_encoding_outputs(
+    input: Option<&File>,
+    output_path: &Option<PathBuf>,
+    encodings: &[InputEncoding],
+) -> io::Result<Option<OutputPerEncoding>> {
+    let Some(template) = output_path.as_ref().and_then(|path| path.to_str()) else {
+        return Ok(None);
+    };
+    if !template.contains(ENCODING_PLACEHOLDER) {
+        return Ok(None);
+    }
+    let mut outputs = std::collections::HashMap::new();
+    for encoding in encodings {
+        let path = PathBuf::from(template.replace(ENCODING_PLACEHOLDER, &encoding.cli_name()));
+        outputs.insert(*encoding, make_output_writer(input, &Some(path))?);
+    }
+    Ok(Some(OutputPerEncoding(outputs)))
+}
+
 fn make_output_writer(input: Option<&File>, output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
     Ok(match output_path {
         Some(path) => {
@@ -308,16 +331,15 @@ fn run_output_stage(
     rx: Receiver<WorkerResult>,
     chunk_total: &AtomicU64,
     cfg: &Config,
-    output: &mut Box<dyn Write>,
+    merge_repeated_lines: bool,
+    output: &mut impl Sink,
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
 ) -> Option<io::Error> {
     let mut pending_files = BTreeMap::<u64, (ChunkResult, ChunkPermit)>::new();
     let mut next_output_chunk = 0u64;
     let mut pending_output = OutputState::new(cfg.temp_dir().clone());
-    if cfg.encodings().contains(&InputEncoding::Utf16le)
-        && cfg.encodings().contains(&InputEncoding::Utf16leAscii)
-    {
+    if merge_repeated_lines {
         pending_output.merge_repeated_lines();
     }
     let output_started = Instant::now();
@@ -579,7 +601,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = temp_guard.path().to_path_buf();
 
     let file = range.as_ref().map(|_| File::open(args.input()).map(Arc::new)).transpose()?;
-    let mut output = make_output_writer(file.as_deref(), args.output())?;
+    let mut encoding_outputs = make_encoding_outputs(file.as_deref(), args.output(), cfg.encodings())?;
+    let mut output = match encoding_outputs {
+        Some(_) => Box::new(io::sink()),
+        None => make_output_writer(file.as_deref(), args.output())?,
+    };
     let feed = Arc::new(match (file, range) {
         (Some(file), Some(range)) => {
             let window = Arc::new(FileWindow { file, start: range.start });
@@ -605,7 +631,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose() >= 2 {
         begin_emitted_counts();
     }
-    let output_error = run_output_stage(rx, feed.chunk_total(), &cfg, &mut output, &cancelled, &detailed_stats);
+    let output_error = match &mut encoding_outputs {
+        Some(outputs) => run_output_stage(rx, feed.chunk_total(), &cfg, false, outputs, &cancelled, &detailed_stats),
+        None => {
+            let merge_repeated_lines = cfg.encodings().contains(&InputEncoding::Utf16le)
+                && cfg.encodings().contains(&InputEncoding::Utf16leAscii);
+            run_output_stage(rx, feed.chunk_total(), &cfg, merge_repeated_lines, &mut output, &cancelled, &detailed_stats)
+        }
+    };
     if let Some(counts) = take_emitted_counts() {
         for (encoding, count) in counts {
             detailed_stats.add_emitted_count(encoding, count);
@@ -626,6 +659,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     output.flush()?;
+    if let Some(outputs) = &mut encoding_outputs {
+        outputs.flush_all()?;
+    }
 
     if cfg.keep_temp() {
         let kept = temp_guard.keep()?;
@@ -669,7 +705,7 @@ mod cancellation_tests {
                 drop(tx);
             });
             let mut output: Box<dyn Write> = Box::new(io::sink());
-            let error = run_output_stage(rx, &AtomicU64::new(1), &config(), &mut output,
+            let error = run_output_stage(rx, &AtomicU64::new(1), &config(), false, &mut output,
                                          &cancelled, &DetailedStats::default());
             worker.join().unwrap();
             assert!(error.is_none(), "{error:?}");
@@ -682,7 +718,7 @@ mod cancellation_tests {
         drop(tx);
         let cancelled = AtomicBool::new(false);
         let mut output: Box<dyn Write> = Box::new(io::sink());
-        let error = run_output_stage(rx, &AtomicU64::new(1), &config(), &mut output,
+        let error = run_output_stage(rx, &AtomicU64::new(1), &config(), false, &mut output,
                                      &cancelled, &DetailedStats::default()).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
