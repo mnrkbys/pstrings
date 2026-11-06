@@ -139,7 +139,9 @@ pub struct Args {
 
     /// How far past the end of a --length range a string may run. A longer
     /// string is cut there, and --stats counts it; the rest of it is not
-    /// output by any range. Accepts the same forms as --offset. [default: 64K]
+    /// output by any range. What remains of a cut string is subject to
+    /// --min-length as usual, so it may not be output at all. Accepts the
+    /// same forms as --offset. [default: 64K]
     #[arg(long = "extend-limit", value_parser = parse_size, verbatim_doc_comment)]
     extend_limit: Option<u64>,
 
@@ -152,9 +154,11 @@ pub struct Args {
     /// bytes per segment, back to back. A string is output if it starts in
     /// the owned part, at offset base_offset + its position in the segment.
     /// It may run into the extension, and is cut at the segment's end, which
-    /// --stats counts when the extension is not empty. No string crosses
-    /// into the next segment. Owned parts must be in ascending order and
-    /// must not overlap.
+    /// --stats counts unless the extension is empty. What remains of a cut
+    /// string is subject to --min-length as usual. No string crosses into
+    /// the next segment. A string starting in the owned part is kept over an
+    /// overlapping UTF-16LE candidate starting in the extension. Owned parts
+    /// must be in ascending order and must not overlap.
     #[arg(long = "segments", verbatim_doc_comment)]
     segments: Option<PathBuf>,
 
@@ -167,7 +171,12 @@ pub struct Args {
     temp_dir: Option<PathBuf>,
 
     /// Print processing statistics, including peak RSS. Same as -v.
-    #[arg(long = "stats")]
+    ///
+    /// cut_strings counts output strings that stopped at --extend-limit or
+    /// at the end of a segment's extension. A string ending just before the
+    /// limit by itself may be counted too, so this can be too high. Segments
+    /// with an empty extension are not counted.
+    #[arg(long = "stats", verbatim_doc_comment)]
     stats: bool,
 
     /// Print processing statistics (as --stats). Repeat (-vv) to add a

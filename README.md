@@ -165,10 +165,16 @@ unallocated parts of a volume. Each piece is extracted on its own: nothing prece
 it, and no string continues into the next one. The input is one line per piece,
 `<base_offset>\t<owned_length>\t<extension_length>` in decimal.
 
+In a segment a string starting in the owned part is kept over an overlapping UTF-16LE
+candidate starting in the extension, as that candidate is not output. A file range
+decides as the whole file does, since the next range outputs the candidate.
+
 `cut_strings` in `--stats` counts output strings that reached the limit (within one
-character of it), which includes a string ending there by itself. `-e utf16le` with
-a file range is exact instead, as it reads past the limit. When the end of the file
-is reached first, nothing is counted.
+character of it). A string ending just before the limit by itself may be counted
+too, so the count can be too high. `-e utf16le` with a file range is exact instead,
+as it reads past the limit. When the end of the file is reached first, nothing is
+counted, and neither is a segment with an empty extension. What remains of a cut
+string is subject to `--min-length` as usual.
 
 `-e utf16le` and `-e utf16le-ascii` print the same label, so a line both would
 print is printed once when they share an output. With `{encoding}` in `-o` each
@@ -300,7 +306,9 @@ Options:
       --extend-limit <EXTEND_LIMIT>
           How far past the end of a --length range a string may run. A longer
           string is cut there, and --stats counts it; the rest of it is not
-          output by any range. Accepts the same forms as --offset. [default: 64K]
+          output by any range. What remains of a cut string is subject to
+          --min-length as usual, so it may not be output at all. Accepts the
+          same forms as --offset. [default: 64K]
 
       --segments <SEGMENTS>
           With -: declares that standard input is a series of segments, each
@@ -312,9 +320,11 @@ Options:
           bytes per segment, back to back. A string is output if it starts in
           the owned part, at offset base_offset + its position in the segment.
           It may run into the extension, and is cut at the segment's end, which
-          --stats counts when the extension is not empty. No string crosses
-          into the next segment. Owned parts must be in ascending order and
-          must not overlap.
+          --stats counts unless the extension is empty. What remains of a cut
+          string is subject to --min-length as usual. No string crosses into
+          the next segment. A string starting in the owned part is kept over an
+          overlapping UTF-16LE candidate starting in the extension. Owned parts
+          must be in ascending order and must not overlap.
 
       --keep-temp
           Keep intermediate chunk result files for debugging
@@ -323,7 +333,12 @@ Options:
           Directory in which the temporary result directory is created
 
       --stats
-          Print processing statistics, including peak RSS. Same as -v
+          Print processing statistics, including peak RSS. Same as -v.
+          
+          cut_strings counts output strings that stopped at --extend-limit or
+          at the end of a segment's extension. A string ending just before the
+          limit by itself may be counted too, so this can be too high. Segments
+          with an empty extension are not counted.
 
   -v, --verbose...
           Print processing statistics (as --stats). Repeat (-vv) to add a per-phase breakdown: scan time and record counts per encoding, plus merge and output timings
