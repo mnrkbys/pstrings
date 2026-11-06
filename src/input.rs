@@ -6,8 +6,11 @@ use crate::outputter::View;
 use crate::scanner::ByteSource;
 use std::fs::File;
 use std::io::{self, BufRead, Read};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 /// Bytes kept on each side of a streamed chunk. Scanners look a few bytes past
 /// their chunk (`scanner::utf16le`'s surrogate checks, `scanner::utf8`'s peek),
@@ -150,6 +153,72 @@ pub struct Work {
     /// Whether nothing after this chunk belongs to `view`, so that strings
     /// still open at its end are over.
     pub ends_view: bool,
+}
+
+/// How much a `CancellableReader` reads at a time, and how many such blocks
+/// wait for a worker.
+const READ_AHEAD_BLOCK: usize = 1024 * 1024;
+const READ_AHEAD_BLOCKS: usize = 2;
+
+/// Reads on a thread of its own, so that a stalled pipe cannot hold up
+/// cancellation: a blocked `read` cannot be interrupted portably, and workers
+/// have to be joined before the temporary directory is removed. The thread is
+/// left behind, blocked, until the process exits.
+struct CancellableReader {
+    blocks: Receiver<io::Result<Vec<u8>>>,
+    block: Vec<u8>,
+    at: usize,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellableReader {
+    fn new(mut reader: Box<dyn Read + Send>, cancelled: Arc<AtomicBool>) -> Self {
+        let (tx, blocks) = sync_channel(READ_AHEAD_BLOCKS);
+        thread::spawn(move || {
+            loop {
+                let mut block = vec![0; READ_AHEAD_BLOCK];
+                let result = reader.read(&mut block).map(|len| {
+                    block.truncate(len);
+                    block
+                });
+                if let Err(e) = &result
+                    && e.kind() == io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                let done = !matches!(&result, Ok(block) if !block.is_empty());
+                if tx.send(result).is_err() || done {
+                    break;
+                }
+            }
+        });
+        CancellableReader { blocks, block: Vec::new(), at: 0, cancelled }
+    }
+}
+
+impl Read for CancellableReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.at == self.block.len() {
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Err(io::Error::other("cancelled"));
+            }
+            match self.blocks.recv_timeout(Duration::from_millis(100)) {
+                Ok(block) => {
+                    self.block = block?;
+                    self.at = 0;
+                    if self.block.is_empty() {
+                        return Ok(0);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Ok(0),
+            }
+        }
+        let len = buf.len().min(self.block.len() - self.at);
+        buf[..len].copy_from_slice(&self.block[self.at..self.at + len]);
+        self.at += len;
+        Ok(len)
+    }
 }
 
 /// A slice of a stream. Offsets are those of the stream as a whole.
@@ -324,9 +393,13 @@ impl Feed {
     }
 
     /// A stream that is one input of unknown length.
-    pub fn stream(reader: Box<dyn Read + Send>, chunk_size: u64) -> Self {
+    pub fn stream(
+        reader: Box<dyn Read + Send>,
+        chunk_size: u64,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
         let region = Region { len: None, view: View::default() };
-        Self::stream_of(reader, chunk_size, vec![region])
+        Self::stream_of(reader, chunk_size, cancelled, vec![region])
     }
 
     /// A stream that is `segments` back to back. Strings end with their
@@ -334,6 +407,7 @@ impl Feed {
     pub fn segmented_stream(
         reader: Box<dyn Read + Send>,
         chunk_size: u64,
+        cancelled: Arc<AtomicBool>,
         segments: Vec<Segment>,
     ) -> Self {
         let regions = segments.into_iter().map(|segment| {
@@ -349,12 +423,17 @@ impl Feed {
             };
             Region { len: Some(len), view }
         });
-        Self::stream_of(reader, chunk_size, regions.collect())
+        Self::stream_of(reader, chunk_size, cancelled, regions.collect())
     }
 
-    fn stream_of(reader: Box<dyn Read + Send>, chunk_size: u64, regions: Vec<Region>) -> Self {
+    fn stream_of(
+        reader: Box<dyn Read + Send>,
+        chunk_size: u64,
+        cancelled: Arc<AtomicBool>,
+        regions: Vec<Region>,
+    ) -> Self {
         let mut feed = StreamFeed {
-            reader,
+            reader: Box::new(CancellableReader::new(reader, cancelled)),
             chunk_size,
             next_index: 0,
             regions: regions.into_iter(),

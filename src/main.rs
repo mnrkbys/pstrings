@@ -82,7 +82,8 @@ fn build_config(args: &Args, input_len: Option<u64>) -> Result<Config, Box<dyn s
     ))
 }
 
-/// Installs the Ctrl+C handler and returns the shared flag it sets.
+/// Installs the handler for Ctrl+C and termination requests, and returns the
+/// shared flag it sets.
 fn install_cancel_handler() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error>> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&cancelled);
@@ -247,8 +248,11 @@ fn worker_loop(
         let Some(permit) = in_flight.acquire(&cancelled) else {
             break;
         };
-        let Some(work) = feed.next()? else {
-            break;
+        let work = match feed.next() {
+            Ok(Some(work)) => work,
+            Ok(None) => break,
+            Err(_) if cancelled.load(Ordering::Relaxed) => break,
+            Err(e) => return Err(e),
         };
         let index = work.index;
 
@@ -612,8 +616,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Feed::file(window, range.len, cfg.chunk_size(), range.view)
         }
         _ => match segments {
-            Some(segments) => Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), segments),
-            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
+            Some(segments) => {
+                Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), Arc::clone(&cancelled), segments)
+            }
+            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size(), Arc::clone(&cancelled)),
         },
     });
 
@@ -655,7 +661,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cancelled.load(Ordering::SeqCst) {
-        return Err("cancelled by Ctrl+C".into());
+        return Err("cancelled".into());
     }
 
     output.flush()?;

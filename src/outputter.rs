@@ -427,7 +427,7 @@ pub fn output_merged_chunk(
     if cancelled.load(Ordering::Relaxed) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
-            "cancelled by Ctrl+C",
+            "cancelled",
         ));
     }
     let mut reader = BufReader::with_capacity(READ_BUFFER_SIZE, file);
@@ -440,7 +440,7 @@ pub fn output_merged_chunk(
         if count % 4096 == 0 && cancelled.load(Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
-                "cancelled by Ctrl+C",
+                "cancelled",
             ));
         }
         let input_bound = (raw.offset, raw.encoding as u16);
