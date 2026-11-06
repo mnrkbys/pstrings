@@ -1,14 +1,14 @@
 use clap::Parser;
 use std::{
     cmp::min,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     time::{Duration, Instant},
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
         mpsc::{sync_channel, RecvTimeoutError, Receiver, SyncSender},
     },
     thread,
@@ -46,7 +46,7 @@ fn build_config(args: &Args, file_len: u64) -> Result<Config, Box<dyn std::error
     let chunk_size = if args.chunk_size().eq_ignore_ascii_case("auto") {
         auto_chunk_size(file_len, jobs)
     } else {
-        let size = parse_size(&args.chunk_size())?.min(file_len);
+        let size = parse_size(&args.chunk_size())?;
 
         if size == 0 {
             return Err("--chunk-size must be > 0".into());
@@ -93,9 +93,23 @@ fn install_cancel_handler() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error
     Ok(cancelled)
 }
 
-fn make_output_writer(output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
+fn make_output_writer(input: &File, output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
     Ok(match output_path {
-        Some(path) => Box::new(BufWriter::with_capacity(WRITE_BUFFER_SIZE, File::create(path)?)),
+        Some(path) => {
+            // Open without truncation and compare the actual handles, so aliases
+            // and links cannot destroy the input before the check completes.
+            let output = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+            if output.metadata()?.is_file() {
+                if same_file::Handle::from_file(input.try_clone()?)?
+                    == same_file::Handle::from_file(output.try_clone()?)?
+                {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                        "input and output refer to the same file"));
+                }
+                output.set_len(0)?;
+            }
+            Box::new(BufWriter::with_capacity(WRITE_BUFFER_SIZE, output))
+        }
         None => Box::new(BufWriter::with_capacity(WRITE_BUFFER_SIZE, io::stdout())),
     })
 }
@@ -144,6 +158,38 @@ fn process_chunk(
     Ok(merged_file)
 }
 
+// A permit survives scanning and queueing until the outputter consumes the
+// chunk. Channel capacity alone cannot bound its out-of-order file map.
+struct InFlight {
+    available: Mutex<usize>,
+    ready: Condvar,
+}
+
+struct ChunkPermit(Arc<InFlight>);
+
+impl InFlight {
+    fn acquire(self: &Arc<Self>, cancelled: &AtomicBool) -> Option<ChunkPermit> {
+        let mut available = self.available.lock().unwrap();
+        while *available == 0 && !cancelled.load(Ordering::Relaxed) {
+            available = self.ready.wait_timeout(available, Duration::from_millis(100)).unwrap().0;
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        *available -= 1;
+        Some(ChunkPermit(Arc::clone(self)))
+    }
+}
+
+impl Drop for ChunkPermit {
+    fn drop(&mut self) {
+        *self.0.available.lock().unwrap() += 1;
+        self.0.ready.notify_one();
+    }
+}
+
+type ChunkResult = (u64, File, ChunkPermit);
+
 /// Body of one worker thread: repeatedly claims the next chunk index,
 /// processes it, and sends the merged result to the outputter. Returns as
 /// soon as chunks run out, cancellation is observed, or the outputter has
@@ -157,7 +203,8 @@ fn worker_loop(
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
     next_chunk: Arc<AtomicU64>,
-    tx: SyncSender<(u64, File)>,
+    tx: SyncSender<ChunkResult>,
+    in_flight: Arc<InFlight>,
     detailed_stats: Arc<DetailedStats>,
 ) -> io::Result<()> {
     loop {
@@ -165,6 +212,9 @@ fn worker_loop(
             break;
         }
 
+        let Some(permit) = in_flight.acquire(&cancelled) else {
+            break;
+        };
         let index = next_chunk.fetch_add(1, Ordering::Relaxed);
         if index >= chunk_count {
             break;
@@ -176,7 +226,7 @@ fn worker_loop(
             break;
         }
 
-        if tx.send((index, merged_file)).is_err() {
+        if tx.send((index, merged_file, permit)).is_err() {
             break;
         }
     }
@@ -195,9 +245,11 @@ fn spawn_workers(
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
     detailed_stats: Arc<DetailedStats>,
-) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<(u64, File)>) {
+) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<ChunkResult>) {
     let next_chunk = Arc::new(AtomicU64::new(0));
-    let (tx, rx): (SyncSender<(u64, File)>, Receiver<(u64, File)>) = sync_channel(cfg.jobs() * 2);
+    let window = cfg.jobs().saturating_mul(2);
+    let in_flight = Arc::new(InFlight { available: Mutex::new(window), ready: Condvar::new() });
+    let (tx, rx): (SyncSender<ChunkResult>, Receiver<ChunkResult>) = sync_channel(window);
 
     let mut handles = Vec::with_capacity(cfg.jobs());
 
@@ -205,13 +257,14 @@ fn spawn_workers(
         let file = Arc::clone(&file);
         let cancelled = Arc::clone(&cancelled);
         let next_chunk = Arc::clone(&next_chunk);
+        let in_flight = Arc::clone(&in_flight);
         let tx = tx.clone();
         let cfg = cfg.clone();
         let temp_dir = temp_dir.clone();
         let detailed_stats = Arc::clone(&detailed_stats);
 
         handles.push(thread::spawn(move || -> io::Result<()> {
-            let result = worker_loop(
+            let result = std::panic::catch_unwind(|| worker_loop(
                 file,
                 file_len,
                 chunk_count,
@@ -220,8 +273,16 @@ fn spawn_workers(
                 Arc::clone(&cancelled),
                 next_chunk,
                 tx,
+                in_flight,
                 detailed_stats,
-            );
+            ));
+            let result = match result {
+                Ok(result) => result,
+                Err(panic) => {
+                    cancelled.store(true, Ordering::SeqCst);
+                    std::panic::resume_unwind(panic);
+                }
+            };
 
             if result.is_err() {
                 cancelled.store(true, Ordering::SeqCst);
@@ -241,7 +302,7 @@ fn spawn_workers(
 /// (if any) rather than propagating it immediately, since the caller still
 /// needs to join the worker threads regardless.
 fn run_output_stage(
-    rx: Receiver<(u64, File)>,
+    rx: Receiver<ChunkResult>,
     chunk_count: u64,
     file_len: u64,
     cfg: &Config,
@@ -249,9 +310,9 @@ fn run_output_stage(
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
 ) -> Option<io::Error> {
-    let mut pending_files = BTreeMap::<u64, File>::new();
+    let mut pending_files = BTreeMap::<u64, (File, ChunkPermit)>::new();
     let mut next_output_chunk = 0u64;
-    let mut pending_output: HashMap<InputEncoding, MatchRecord> = HashMap::new();
+    let mut pending_output = OutputState::new(cfg.temp_dir().clone());
     let output_started = Instant::now();
     let mut output_processing = Duration::ZERO;
     let mut output_error: Option<io::Error> = None;
@@ -263,8 +324,8 @@ fn run_output_stage(
 
         while !pending_files.contains_key(&next_output_chunk) {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok((index, file)) => {
-                    pending_files.insert(index, file);
+                Ok((index, file, permit)) => {
+                    pending_files.insert(index, (file, permit));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if cancelled.load(Ordering::Relaxed) {
@@ -272,6 +333,11 @@ fn run_output_stage(
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    // Cancellation can close the last sender while recv_timeout
+                    // is blocked. That is normal shutdown, not a missing chunk.
+                    if cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
                     output_error = Some(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         format!(
@@ -288,7 +354,7 @@ fn run_output_stage(
             break;
         }
 
-        let merged_file = pending_files.remove(&next_output_chunk).unwrap();
+        let (merged_file, _permit) = pending_files.remove(&next_output_chunk).unwrap();
         let output_processing_started = Instant::now();
 
         if let Err(e) = output_merged_chunk(
@@ -471,7 +537,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let temp_dir = temp_guard.path().to_path_buf();
 
     let file = Arc::new(File::open(args.input())?);
-    let chunk_count = (file_len + cfg.chunk_size() - 1) / cfg.chunk_size();
+    let mut output = make_output_writer(&file, args.output())?;
+    let chunk_count = file_len.div_ceil(cfg.chunk_size());
 
     let (handles, rx) = spawn_workers(
         Arc::clone(&file),
@@ -483,7 +550,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&detailed_stats),
     );
 
-    let mut output = make_output_writer(args.output())?;
     // Only tally output records when they'll actually be shown. When they
     // won't, the counters in `outputter`'s write path short-circuit on an
     // already-`None` check.
@@ -529,5 +595,45 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config::new(vec![InputEncoding::Ascii], vec![CharacterFilter::Ascii],
+                    4, 1, 8, false, None, false)
+    }
+
+    #[test]
+    fn channel_shutdown_after_cancellation_is_not_a_worker_failure() {
+        for _ in 0..4 {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&cancelled);
+            let (tx, rx) = sync_channel(1);
+            let worker = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                flag.store(true, Ordering::SeqCst);
+                drop(tx);
+            });
+            let mut output: Box<dyn Write> = Box::new(io::sink());
+            let error = run_output_stage(rx, 1, 8, &config(), &mut output,
+                                         &cancelled, &DetailedStats::default());
+            worker.join().unwrap();
+            assert!(error.is_none(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn an_unexpected_channel_shutdown_is_still_an_error() {
+        let (tx, rx) = sync_channel(1);
+        drop(tx);
+        let cancelled = AtomicBool::new(false);
+        let mut output: Box<dyn Write> = Box::new(io::sink());
+        let error = run_output_stage(rx, 1, 8, &config(), &mut output,
+                                     &cancelled, &DetailedStats::default()).unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
