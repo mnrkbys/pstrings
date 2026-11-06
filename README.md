@@ -166,8 +166,9 @@ it, and no string continues into the next one. The input is one line per piece,
 `<base_offset>\t<owned_length>\t<extension_length>` in decimal.
 
 `cut_strings` in `--stats` counts output strings that reached the limit (within one
-character of it), which includes a string ending there by itself. When the end of
-the file is reached first, nothing is counted.
+character of it), which includes a string ending there by itself. `-e utf16le` with
+a file range is exact instead, as it reads past the limit. When the end of the file
+is reached first, nothing is counted.
 
 `-e utf16le` and `-e utf16le-ascii` print the same label, so a line both would
 print is printed once when they share an output. With `{encoding}` in `-o` each

@@ -241,6 +241,47 @@ fn the_limit_cuts_full_utf16_between_characters() {
 }
 
 #[test]
+fn the_limit_counts_characters_correctly_in_mixed_width_text() {
+    let mut bytes = vec![0, 0];
+    bytes.extend(utf16(&format!("{}{}\0", "漢".repeat(22000), "a".repeat(10000))));
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_input(dir.path(), &bytes);
+    let options = ["-e", "utf16le", "-f", "ascii,kanji", "-j", "1", "--offset", "2", "--length", "2"];
+    let out = lines(&run(&[&options[..], &["--extend-limit", "45998", &path]].concat()));
+    let expected = format!("{}{}", "漢".repeat(22000), "a".repeat(1000));
+    assert_eq!(out, [format!("{:020}\tUTF16LE\t{expected}", 2)]);
+}
+
+#[test]
+fn a_full_utf16_string_ending_inside_the_limit_is_not_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    for (text, filter, limit) in [
+        // The string ends exactly at the stop, and just before it.
+        ("abcd\0\0", "ascii", "6"),
+        ("abcd\0\0", "ascii", "8"),
+        ("𠀀𠀀\0\0", "kanji-ext-b", "6"),
+        ("𠀀𠀀\0\0", "kanji-ext-b", "8"),
+    ] {
+        let path = write_input(dir.path(), &utf16(text));
+        let options = ["-e", "utf16le", "-f", filter, "-m", "2", "--offset", "0", "--length", "2"];
+        let out = run(&[&options[..], &["--extend-limit", limit, "--stats", &path]].concat());
+        assert_eq!(lines(&out).len(), 1, "{text:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("cut_strings: 0"), "{text:?} limit {limit}: {stderr}");
+    }
+}
+
+#[test]
+fn a_full_utf16_string_running_past_the_limit_is_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_input(dir.path(), &utf16("abcdefgh\0\0"));
+    let options = ["-e", "utf16le", "--offset", "0", "--length", "2", "--extend-limit", "8", "--stats"];
+    let out = run(&[&options[..], &[path.as_str()]].concat());
+    assert_eq!(lines(&out), [format!("{:020}\tUTF16LE\tabcde", 0)]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cut_strings: 1"));
+}
+
+#[test]
 fn a_string_ending_at_the_end_of_the_file_is_not_cut() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_input(dir.path(), b"\0abcdefgh");

@@ -80,6 +80,7 @@ pub fn plan_file_range(
             end: end - start,
             stop: stop - start,
             cuts: stop < file_len,
+            utf16le_past_stop: utf16le,
         },
     })
 }
@@ -342,6 +343,7 @@ impl Feed {
                 end: segment.owned_length,
                 stop: len,
                 cuts: segment.extension_length > 0,
+                utf16le_past_stop: false,
             };
             Region { len: Some(len), view }
         });

@@ -112,11 +112,21 @@ pub struct View {
     pub stop: u64,
     /// Whether `stop` can cut a string, as opposed to being the input's end.
     pub cuts: bool,
+    /// Whether `scanner::utf16le` reads past `stop`, so that its strings show
+    /// whether they really go on.
+    pub utf16le_past_stop: bool,
 }
 
 impl Default for View {
     fn default() -> Self {
-        View { base: 0, start: 0, end: u64::MAX, stop: u64::MAX, cuts: false }
+        View {
+            base: 0,
+            start: 0,
+            end: u64::MAX,
+            stop: u64::MAX,
+            cuts: false,
+            utf16le_past_stop: false,
+        }
     }
 }
 
@@ -126,6 +136,9 @@ impl View {
     }
 
     fn reaches_stop(&self, encoding: InputEncoding, end: u64) -> bool {
+        if encoding == InputEncoding::Utf16le && self.utf16le_past_stop {
+            return end > self.stop;
+        }
         self.cuts && end + encoding.max_char_len() > self.stop
     }
 
