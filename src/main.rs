@@ -116,6 +116,28 @@ fn make_encoding_outputs(
     Ok(Some(OutputPerEncoding(outputs)))
 }
 
+/// How long a cancelled run gets to wind down by itself.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+/// Ends the process once a cancelled run has had `CANCEL_GRACE` to stop.
+///
+/// A thread blocked reading a stalled stdin or writing to a full pipe never
+/// sees the flag, and neither read nor write can be interrupted portably. The
+/// temporary directory holds extracted strings, so it goes first.
+fn spawn_cancel_watchdog(cancelled: Arc<AtomicBool>, temp_dir: Option<PathBuf>) {
+    thread::spawn(move || {
+        while !cancelled.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(CANCEL_GRACE);
+        if let Some(temp_dir) = temp_dir {
+            let _ = std::fs::remove_dir_all(temp_dir);
+        }
+        eprintln!("error: cancelled");
+        std::process::exit(1);
+    });
+}
+
 fn make_output_writer(input: Option<&File>, output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
     Ok(match output_path {
         Some(path) => {
@@ -248,11 +270,8 @@ fn worker_loop(
         let Some(permit) = in_flight.acquire(&cancelled) else {
             break;
         };
-        let work = match feed.next() {
-            Ok(Some(work)) => work,
-            Ok(None) => break,
-            Err(_) if cancelled.load(Ordering::Relaxed) => break,
-            Err(e) => return Err(e),
+        let Some(work) = feed.next()? else {
+            break;
         };
         let index = work.index;
 
@@ -603,6 +622,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let temp_guard = TempDirGuard::new(cfg.temp_dir().as_deref(), cfg.keep_temp())?;
     let temp_dir = temp_guard.path().to_path_buf();
+    spawn_cancel_watchdog(Arc::clone(&cancelled), (!cfg.keep_temp()).then(|| temp_dir.clone()));
 
     let file = range.as_ref().map(|_| File::open(args.input()).map(Arc::new)).transpose()?;
     let mut encoding_outputs = make_encoding_outputs(file.as_deref(), args.output(), cfg.encodings())?;
@@ -616,10 +636,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Feed::file(window, range.len, cfg.chunk_size(), range.view)
         }
         _ => match segments {
-            Some(segments) => {
-                Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), Arc::clone(&cancelled), segments)
-            }
-            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size(), Arc::clone(&cancelled)),
+            Some(segments) => Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), segments),
+            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
         },
     });
 

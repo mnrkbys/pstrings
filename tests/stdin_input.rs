@@ -89,11 +89,34 @@ fn a_read_error_fails_the_run() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// Sends SIGTERM and checks the process ends soon, removing its temporary
+/// directory.
+#[cfg(unix)]
+fn assert_terminates(child: &mut std::process::Child, temp_dir: &std::path::Path) {
+    use std::time::{Duration, Instant};
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(fs::read_dir(temp_dir).unwrap().count(), 1, "the run has its directory");
+    let started = Instant::now();
+    let kill = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
+    assert!(kill.success());
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            child.kill().unwrap();
+            panic!("still running");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(fs::read_dir(temp_dir).unwrap().count(), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_termination_request_ends_a_stalled_stream_and_leaves_no_temporary_files() {
-    use std::time::{Duration, Instant};
-
     let temp = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_pstrings"))
         .args(["-c", "4K", "-j", "2", "--temp-dir"])
@@ -107,19 +130,25 @@ fn a_termination_request_ends_a_stalled_stream_and_leaves_no_temporary_files() {
     // Some complete chunks, then a pipe that stays open with nothing to read.
     let mut pipe = child.stdin.take().unwrap();
     pipe.write_all(&b"some text\0".repeat(5000)).unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-
-    let started = Instant::now();
-    let kill = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
-    assert!(kill.success());
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(started.elapsed() < Duration::from_secs(5), "still running");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(status.code(), Some(1));
-    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    assert_terminates(&mut child, temp.path());
     drop(pipe);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_termination_request_ends_a_run_blocked_on_its_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.bin");
+    fs::write(&input, b"abcdefgh\0".repeat(500_000)).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    // More output than the write buffer and the pipe hold, and nobody reading.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pstrings"))
+        .args(["-e", "ascii", "-j", "1", "-c", "64K", "--temp-dir"])
+        .arg(temp.path())
+        .arg(&input)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert_terminates(&mut child, temp.path());
 }
