@@ -1,3 +1,4 @@
+use crate::chunk::parse_size;
 use crate::encoding::InputEncoding;
 use crate::filter::{CharacterFilter, FilterSet};
 use clap::Parser;
@@ -114,6 +115,32 @@ pub struct Args {
     )]
     chunk_size: String,
 
+    /// Start of the file range to extract, as a byte offset. Only strings
+    /// starting in the range are output, and their offsets stay relative to
+    /// the start of the file. A string that started before the range belongs
+    /// to the range before, so it is not output, even in part. To tell, up
+    /// to max(--extend-limit, 64 KiB) bytes before the offset are read, for
+    /// every encoding; CP932-like encodings need a byte that cannot be part
+    /// of a character within those bytes to find character boundaries.
+    /// Accepts decimal, 0x hexadecimal, and K/M/G/T suffixes. Must be before
+    /// the end of the file. Not available with -.
+    #[arg(long = "offset", value_parser = parse_size, verbatim_doc_comment)]
+    offset: Option<u64>,
+
+    /// Length of the file range in bytes: how much of the file the range
+    /// owns, not how much is read. A string starting in the range is read
+    /// past its end, up to --extend-limit. [default: to the end of the file]
+    /// Accepts the same forms as --offset. Must be > 0. A range running past
+    /// the end of the file stops there.
+    #[arg(long = "length", value_parser = parse_size, verbatim_doc_comment)]
+    length: Option<u64>,
+
+    /// How far past the end of a --length range a string may run. A longer
+    /// string is cut there, and --stats counts it; the rest of it is not
+    /// output by any range. Accepts the same forms as --offset. [default: 64K]
+    #[arg(long = "extend-limit", value_parser = parse_size, verbatim_doc_comment)]
+    extend_limit: Option<u64>,
+
     /// Keep intermediate chunk result files for debugging.
     #[arg(long = "keep-temp")]
     keep_temp: bool,
@@ -140,6 +167,18 @@ impl Args {
 
     pub fn str_only(&self) -> bool {
         self.str_only
+    }
+
+    pub fn offset(&self) -> Option<u64> {
+        self.offset
+    }
+
+    pub fn length(&self) -> Option<u64> {
+        self.length
+    }
+
+    pub fn extend_limit(&self) -> Option<u64> {
+        self.extend_limit
     }
 
     pub fn output(&self) -> &Option<PathBuf> {

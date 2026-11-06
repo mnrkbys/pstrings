@@ -68,6 +68,60 @@ fn note_emitted(encoding: InputEncoding) {
     }
 }
 
+/// Which of the scanned strings are output, and where. The scan reports offsets
+/// from the start of what it was given; every field but `base` uses those.
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    /// Added to a string's offset to get the offset that is printed.
+    pub base: u64,
+    /// Only strings starting in `[start, end)` are output. The bytes around
+    /// that range are context for deciding what the strings are.
+    pub start: u64,
+    pub end: u64,
+    /// Strings end here at the latest. Only `scanner::utf16le` is scanned
+    /// past it, and its strings are cut here on output.
+    pub stop: u64,
+    /// Whether `stop` can cut a string, as opposed to being the input's end.
+    pub cuts: bool,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View { base: 0, start: 0, end: u64::MAX, stop: u64::MAX, cuts: false }
+    }
+}
+
+impl View {
+    fn owns(&self, offset: u64) -> bool {
+        (self.start..self.end).contains(&offset)
+    }
+
+    fn reaches_stop(&self, encoding: InputEncoding, end: u64) -> bool {
+        self.cuts && end + encoding.max_char_len() > self.stop
+    }
+
+    /// Decides whether `record` is output, cutting it and moving it to its
+    /// printed offset if so.
+    fn admit(&self, record: &mut MatchRecord, min_cch: u64, cut: &mut u64) -> io::Result<bool> {
+        if !self.owns(record.offset) {
+            return Ok(false);
+        }
+        let end = record.offset + record.cb;
+        if end > self.stop {
+            let RecordData::Spilled(data) = &mut record.data else {
+                unreachable!("only queued UTF-16LE records reach past the stop");
+            };
+            record.cch = data.cut_utf16_text(self.stop - record.offset)?;
+            if record.cch < min_cch {
+                return Ok(false);
+            }
+        }
+        *cut += u64::from(self.reaches_stop(record.encoding, end));
+        record.offset += self.base;
+        Ok(true)
+    }
+}
+
 /// State retained between chunks. In addition to unfinished strings, this
 /// retains complete records that must wait for an earlier string to close.
 #[derive(Default)]
@@ -77,6 +131,8 @@ pub struct OutputState {
     discard_parity: [bool; 2],
     ready: HashMap<InputEncoding, RecordQueue>,
     temp_dir: Option<PathBuf>,
+    view: View,
+    cut: u64,
 }
 
 impl OutputState {
@@ -85,6 +141,16 @@ impl OutputState {
             temp_dir,
             ..Self::default()
         }
+    }
+
+    /// Sets what the following chunks' strings are measured against.
+    pub fn set_view(&mut self, view: View) {
+        self.view = view;
+    }
+
+    /// How many output strings were stopped by the end of the view.
+    pub fn cut_count(&self) -> u64 {
+        self.cut
     }
 
     fn enqueue(&mut self, record: MatchRecord) -> io::Result<()> {
@@ -202,6 +268,7 @@ impl OutputState {
     fn emit_before(
         &mut self,
         bound: (u64, u16),
+        min_cch: u64,
         out: &mut impl Write,
         str_only: bool,
     ) -> io::Result<()> {
@@ -211,8 +278,10 @@ impl OutputState {
         while let Some(key) = self.ready_key().filter(|key| *key < bound) {
             let encoding = InputEncoding::try_from(key.1)?;
             let queue = self.ready.get_mut(&encoding).unwrap();
-            let record = queue.pop()?;
-            write_output_record(out, &record, str_only, &mut scratch)?;
+            let mut record = queue.pop()?;
+            if self.view.admit(&mut record, min_cch, &mut self.cut)? {
+                write_output_record(out, &record, str_only, &mut scratch)?;
+            }
             drop(record);
             queue.reset_if_empty()?;
         }
@@ -285,12 +354,14 @@ pub fn output_merged_chunk(
             && input_bound < earlier
         {
             if let RecordDataRef::Text(text) = raw.data {
-                state.emit_before(input_bound, out, str_only)?;
+                state.emit_before(input_bound, min_cch, out, str_only)?;
                 if state.ready_key().is_none_or(|key| key >= input_bound) {
-                    if raw.cch >= min_cch {
+                    if raw.cch >= min_cch && state.view.owns(raw.offset) {
+                        let end = raw.offset + raw.cb;
+                        state.cut += u64::from(state.view.reaches_stop(raw.encoding, end));
                         write_output_record_str(
                             out,
-                            raw.offset,
+                            state.view.base + raw.offset,
                             raw.encoding,
                             text,
                             str_only,
@@ -326,6 +397,7 @@ pub fn output_merged_chunk(
             .unwrap_or((u64::MAX, u16::MAX));
         state.emit_before(
             input_bound.min(previous_bound).min(state.lower_bound()),
+            min_cch,
             out,
             str_only,
         )?;
@@ -338,7 +410,7 @@ pub fn output_merged_chunk(
             state.complete(prev, min_cch)?;
         }
     }
-    state.emit_before(state.lower_bound().min((chunk_end, 0)), out, str_only)
+    state.emit_before(state.lower_bound().min((chunk_end, 0)), min_cch, out, str_only)
 }
 
 /// Finishes the final pending strings and drains all complete records in order.
@@ -352,7 +424,7 @@ pub fn flush_pending(
         state.complete(rec, min_cch)?;
     }
     state.pending.clear(); // incomplete final code units have no continuation
-    state.emit_before((u64::MAX, u16::MAX), out, str_only)
+    state.emit_before((u64::MAX, u16::MAX), min_cch, out, str_only)
 }
 
 fn owned_from_raw_record(rec: &crate::record::RawRecord<'_>) -> MatchRecord {

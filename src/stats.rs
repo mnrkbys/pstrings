@@ -1,6 +1,7 @@
 use crate::encoding::InputEncoding;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -14,6 +15,7 @@ pub struct DetailedStats {
     merge_time: Mutex<Duration>,
     output_processing_time: Mutex<Duration>,
     output_wait_time: Mutex<Duration>,
+    cut_strings: AtomicU64,
 }
 
 impl DetailedStats {
@@ -67,6 +69,15 @@ impl DetailedStats {
 
     pub fn output_wait_time(&self) -> &Mutex<Duration> {
         &self.output_wait_time
+    }
+
+    /// Output strings that stopped at the extension limit.
+    pub fn cut_strings(&self) -> u64 {
+        self.cut_strings.load(Ordering::Relaxed)
+    }
+
+    pub fn set_cut_strings(&self, count: u64) {
+        self.cut_strings.store(count, Ordering::Relaxed);
     }
 
     pub fn add_scan_time(&self, encoding: InputEncoding, elapsed: Duration) {

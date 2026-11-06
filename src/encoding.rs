@@ -118,6 +118,19 @@ impl InputEncoding {
         }
     }
 
+    /// The most bytes a scanner can leave unused at the end of its input
+    /// because they do not complete a character, plus one: a run that stops
+    /// this close to the end may have been cut there.
+    pub(crate) fn max_char_len(self) -> u64 {
+        match self {
+            Self::Ascii | Self::Windows1251 => 1,
+            Self::Utf16leAscii | Self::Cp932 | Self::Gbk | Self::EucKr | Self::Big5 => 2,
+            Self::Utf16le | Self::Utf8 | Self::Gb18030 => 4,
+            // A held-back escape sequence and the first byte of a kanji pair.
+            Self::Iso2022Jp => 5,
+        }
+    }
+
     /// Whether this encoding is self-synchronizing: whether every byte
     /// position unambiguously tells you where a character starts, so a
     /// chunk-boundary fragment can always be decoded immediately at scan

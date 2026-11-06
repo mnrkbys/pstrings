@@ -32,6 +32,38 @@ impl Spilled {
     }
 }
 
+impl Spilled {
+    /// Shortens text decoded from UTF-16LE to the characters that fit in
+    /// `max_cb` source bytes, returning how many characters remain. Only the
+    /// UTF-8 lead bytes are needed: 4-byte characters came from surrogate
+    /// pairs and every other character from one code unit.
+    pub fn cut_utf16_text(&mut self, max_cb: u64) -> io::Result<u64> {
+        let mut block = vec![0; self.len.min(64 * 1024) as usize];
+        let (mut pos, mut cb, mut cch) = (0u64, 0u64, 0u64);
+        while pos < self.len {
+            let at = pos % block.len() as u64;
+            if at == 0 {
+                let len = (self.len - pos).min(block.len() as u64) as usize;
+                crate::scanner::read_exact_at(&self.file, &mut block[..len], self.start + pos)?;
+            }
+            let (text_len, source_len) = match block[at as usize] {
+                0..=0x7f => (1, 2),
+                0x80..=0xdf => (2, 2),
+                0xe0..=0xef => (3, 2),
+                _ => (4, 4),
+            };
+            if cb + source_len > max_cb {
+                break;
+            }
+            pos += text_len;
+            cb += source_len;
+            cch += 1;
+        }
+        self.len = pos;
+        Ok(cch)
+    }
+}
+
 impl RecordData {
     pub fn payload_len(&self) -> u64 {
         match self {

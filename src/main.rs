@@ -122,8 +122,8 @@ fn process_chunk(
     temp_dir: &Path,
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
-) -> io::Result<(File, Chunk)> {
-    let Work { index, source, chunk, input_len } = work;
+) -> io::Result<ChunkResult> {
+    let Work { index, source, chunk, input_len, view } = work;
     let mut files = Vec::new();
 
     for encoding in cfg.encodings() {
@@ -137,8 +137,15 @@ fn process_chunk(
             temp_dir.join(format!("chunk-{:020}-{}.bin", index, encoding.name()))
         };
 
+        // Only `scanner::utf16le` needs the bytes past the view's stop.
+        let scan_len = if *encoding == InputEncoding::Utf16le { input_len } else { input_len.min(view.stop) };
+        if chunk.offset() >= scan_len {
+            continue;
+        }
+        let scan_chunk = Chunk::new(chunk.offset(), chunk.len().min(scan_len - chunk.offset()));
+
         let scan_started = Instant::now();
-        let (record_len, file) = scan(*encoding, source.as_ref(), input_len, &chunk, cfg, &path, cancelled)?;
+        let (record_len, file) = scan(*encoding, source.as_ref(), scan_len, &scan_chunk, cfg, &path, cancelled)?;
         detailed_stats.add_scan_time(*encoding, scan_started.elapsed());
         detailed_stats.add_record_count(*encoding, record_len);
 
@@ -153,7 +160,7 @@ fn process_chunk(
     let merged_file = merge_chunk_encodings(files, &merged_path, cancelled, cfg)?;
     detailed_stats.add_merge(merge_started.elapsed());
 
-    Ok((merged_file, chunk))
+    Ok(ChunkResult { file: merged_file, chunk, view })
 }
 
 // A permit survives scanning and queueing until the outputter consumes the
@@ -186,7 +193,13 @@ impl Drop for ChunkPermit {
     }
 }
 
-type ChunkResult = (u64, File, Chunk, ChunkPermit);
+struct ChunkResult {
+    file: File,
+    chunk: Chunk,
+    view: View,
+}
+
+type WorkerResult = (u64, ChunkResult, ChunkPermit);
 
 /// Body of one worker thread: repeatedly claims the next chunk index,
 /// processes it, and sends the merged result to the outputter. Returns as
@@ -198,7 +211,7 @@ fn worker_loop(
     cfg: Config,
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
-    tx: SyncSender<ChunkResult>,
+    tx: SyncSender<WorkerResult>,
     in_flight: Arc<InFlight>,
     detailed_stats: Arc<DetailedStats>,
 ) -> io::Result<()> {
@@ -215,13 +228,13 @@ fn worker_loop(
         };
         let index = work.index;
 
-        let (merged_file, chunk) = process_chunk(work, &cfg, &temp_dir, &cancelled, &detailed_stats)?;
+        let result = process_chunk(work, &cfg, &temp_dir, &cancelled, &detailed_stats)?;
 
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
 
-        if tx.send((index, merged_file, chunk, permit)).is_err() {
+        if tx.send((index, result, permit)).is_err() {
             break;
         }
     }
@@ -238,10 +251,10 @@ fn spawn_workers(
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
     detailed_stats: Arc<DetailedStats>,
-) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<ChunkResult>) {
+) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<WorkerResult>) {
     let window = cfg.jobs().saturating_mul(2);
     let in_flight = Arc::new(InFlight { available: Mutex::new(window), ready: Condvar::new() });
-    let (tx, rx): (SyncSender<ChunkResult>, Receiver<ChunkResult>) = sync_channel(window);
+    let (tx, rx): (SyncSender<WorkerResult>, Receiver<WorkerResult>) = sync_channel(window);
 
     let mut handles = Vec::with_capacity(cfg.jobs());
 
@@ -291,14 +304,14 @@ fn spawn_workers(
 /// (if any) rather than propagating it immediately, since the caller still
 /// needs to join the worker threads regardless.
 fn run_output_stage(
-    rx: Receiver<ChunkResult>,
+    rx: Receiver<WorkerResult>,
     chunk_total: &AtomicU64,
     cfg: &Config,
     output: &mut Box<dyn Write>,
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
 ) -> Option<io::Error> {
-    let mut pending_files = BTreeMap::<u64, (File, Chunk, ChunkPermit)>::new();
+    let mut pending_files = BTreeMap::<u64, (ChunkResult, ChunkPermit)>::new();
     let mut next_output_chunk = 0u64;
     let mut pending_output = OutputState::new(cfg.temp_dir().clone());
     let output_started = Instant::now();
@@ -316,8 +329,8 @@ fn run_output_stage(
             && next_output_chunk < chunk_total.load(Ordering::SeqCst)
         {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok((index, file, chunk, permit)) => {
-                    pending_files.insert(index, (file, chunk, permit));
+                Ok((index, result, permit)) => {
+                    pending_files.insert(index, (result, permit));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if cancelled.load(Ordering::Relaxed) {
@@ -348,15 +361,16 @@ fn run_output_stage(
             break;
         }
 
-        let Some((merged_file, chunk, _permit)) = pending_files.remove(&next_output_chunk) else {
+        let Some((result, _permit)) = pending_files.remove(&next_output_chunk) else {
             break;
         };
+        pending_output.set_view(result.view);
         let output_processing_started = Instant::now();
 
         if let Err(e) = output_merged_chunk(
-            merged_file,
-            chunk.offset(),
-            chunk.len(),
+            result.file,
+            result.chunk.offset(),
+            result.chunk.len(),
             &mut pending_output,
             cfg.min_cch(),
             output,
@@ -397,6 +411,7 @@ fn run_output_stage(
         output_processing += output_processing_started.elapsed();
     }
 
+    detailed_stats.set_cut_strings(pending_output.cut_count());
     let output_wall = output_started.elapsed();
     detailed_stats.add_output_processing(output_processing);
     detailed_stats.add_output_wait(output_wall.saturating_sub(output_processing));
@@ -429,6 +444,7 @@ fn print_stats(
     eprintln!("  chunks:      {}", chunk_count);
     eprintln!("  workers:     {}", cfg.jobs());
     eprintln!("  chunk_size:  {}", format_bytes(cfg.chunk_size()));
+    eprintln!("  cut_strings: {}", detailed_stats.cut_strings());
 
     let elapsed = started.elapsed();
     let mib_per_sec = if elapsed.as_secs_f64() > 0.0 {
@@ -522,8 +538,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let from_stdin = args.input().as_os_str() == "-";
-    let file_len = if from_stdin { None } else { Some(validate_input_file(args.input())?) };
-    let cfg = build_config(&args, file_len)?;
+    if from_stdin && (args.offset().is_some() || args.length().is_some() || args.extend_limit().is_some()) {
+        return Err("--offset, --length and --extend-limit need a file, not -".into());
+    }
+    let range = if from_stdin {
+        None
+    } else {
+        let file_len = validate_input_file(args.input())?;
+        let utf16le = args.encoding().is_some_and(|e| e.contains(&InputEncoding::Utf16le));
+        let limit = args.extend_limit().unwrap_or(DEFAULT_EXTEND_LIMIT);
+        Some(plan_file_range(file_len, args.offset(), args.length(), limit, utf16le)?)
+    };
+    let cfg = build_config(&args, range.as_ref().map(|range| range.len))?;
 
     let detailed_stats = Arc::new(DetailedStats::default());
     let cancelled = install_cancel_handler()?;
@@ -531,10 +557,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let temp_guard = TempDirGuard::new(cfg.temp_dir().as_deref(), cfg.keep_temp())?;
     let temp_dir = temp_guard.path().to_path_buf();
 
-    let file = file_len.map(|_| File::open(args.input()).map(Arc::new)).transpose()?;
+    let file = range.as_ref().map(|_| File::open(args.input()).map(Arc::new)).transpose()?;
     let mut output = make_output_writer(file.as_deref(), args.output())?;
-    let feed = Arc::new(match (file, file_len) {
-        (Some(file), Some(len)) => Feed::file(file, len, cfg.chunk_size()),
+    let feed = Arc::new(match (file, range) {
+        (Some(file), Some(range)) => {
+            let window = Arc::new(FileWindow { file, start: range.start });
+            Feed::file(window, range.len, cfg.chunk_size(), range.view)
+        }
         _ => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
     });
 
