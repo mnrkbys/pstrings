@@ -6,7 +6,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "pstrings", version, about = "Parallel strings extractor for very large files")]
 pub struct Args {
-    /// Input file.
+    /// Input file, or - to read a stream from standard input. A stream is
+    /// read once, in order, and never written to disk; the output is the
+    /// same as for a file holding the same bytes.
     input: PathBuf,
 
     /// Omit the offset and encoding columns, printing only the matched
@@ -98,7 +100,9 @@ pub struct Args {
 
     /// Chunk size, the unit of parallel work. Accepts K/M/G/T suffixes
     /// (binary, so 1K is 1024), or "auto" to derive one from the input
-    /// size and thread count. The last chunk may be shorter. Must be even when
+    /// size and thread count (16 MiB for standard input, where each worker
+    /// holds about one chunk in memory). The last chunk may be shorter. Must
+    /// be even when
     /// -e utf16le is selected, so a chunk boundary cannot fall inside a
     /// code unit.
     #[arg(

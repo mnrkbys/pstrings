@@ -43,6 +43,10 @@ pub(crate) const AUTO_MIN_CHUNK_SIZE: u64 = 16 * 1024 * 1024;
 /// indivisible unit one thread must finish alone.
 const AUTO_MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 
+/// What "auto" means for a stream. Its length is unknown, so there is nothing
+/// to derive a size from, and each worker holds a whole chunk in memory.
+pub(crate) const STREAM_CHUNK_SIZE: u64 = AUTO_MIN_CHUNK_SIZE;
+
 /// One contiguous byte range of the input file, identified by absolute
 /// file offset.
 ///
@@ -62,6 +66,14 @@ pub struct Chunk {
 impl Chunk {
     pub fn new(offset: u64, len: u64) -> Self {
         Chunk { offset, len }
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
     }
 }
 
