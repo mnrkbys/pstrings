@@ -81,6 +81,7 @@ pub fn plan_file_range(
             stop: stop - start,
             cuts: stop < file_len,
             utf16le_past_stop: utf16le,
+            owned_wins_overlap: false,
         },
     })
 }
@@ -344,6 +345,7 @@ impl Feed {
                 stop: len,
                 cuts: segment.extension_length > 0,
                 utf16le_past_stop: false,
+                owned_wins_overlap: true,
             };
             Region { len: Some(len), view }
         });

@@ -49,6 +49,48 @@ fn strings_do_not_cross_a_segment_boundary() {
     }
 }
 
+/// An even run overlapped by a longer odd run that starts `shared` units
+/// before its end. `[0, 0]` ends the even reading only, and the zero pair in
+/// the middle ends the odd reading only.
+fn overlapping_runs(pad: usize) -> (Vec<u8>, usize, usize) {
+    let mut bytes = vec![0; pad + 4];
+    let both = |units| [0x42, 0x4e].repeat(units);
+    bytes.extend(both(50));
+    bytes.extend([0x42, 0, 0, 0x4e]);
+    let odd_start = bytes.len() - 1;
+    bytes.extend(both(10));
+    bytes.extend([0, 0]);
+    bytes.extend(both(70));
+    bytes.extend([0; 4]);
+    (bytes, pad + 4, odd_start)
+}
+
+#[test]
+fn a_longer_candidate_in_the_extension_does_not_remove_an_owned_string() {
+    // `pad` swaps which parity is in the owned part.
+    for pad in [0, 1] {
+        let (bytes, owned_start, candidate) = overlapping_runs(pad);
+        let options = ["-e", "utf16le", "-f", "printable", "-m", "3"];
+        let label = "\tUTF16LE\t";
+        for chunk in ["8", "auto"] {
+            let options = [&options[..], &["-c", chunk]].concat();
+            let len = bytes.len();
+            let segments = format!("1000\t{candidate}\t{}\n", len - candidate);
+            let out = lines(&run(&segments, &bytes, &options));
+            assert_eq!(out.len(), 1, "pad={pad} -c {chunk}: {out:?}");
+            let start = format!("{:020}{label}", 1000 + owned_start);
+            assert!(out[0].starts_with(&start), "pad={pad} -c {chunk}: {out:?}");
+
+            // Owned as well, the candidate is judged by length and wins.
+            let whole = format!("1000\t{len}\t0\n");
+            let out = lines(&run(&whole, &bytes, &options));
+            assert_eq!(out.len(), 1, "pad={pad} -c {chunk}: {out:?}");
+            let start = format!("{:020}{label}", 1000 + candidate);
+            assert!(out[0].starts_with(&start), "pad={pad} -c {chunk}: {out:?}");
+        }
+    }
+}
+
 #[test]
 fn a_string_starting_in_the_extension_is_not_output() {
     for options in CHUNK_OPTIONS {

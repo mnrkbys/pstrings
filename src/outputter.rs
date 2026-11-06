@@ -115,6 +115,11 @@ pub struct View {
     /// Whether `scanner::utf16le` reads past `stop`, so that its strings show
     /// whether they really go on.
     pub utf16le_past_stop: bool,
+    /// Whether a candidate starting in `[start, end)` beats an overlapping
+    /// one starting elsewhere, whatever their lengths. The other candidate is
+    /// never output, so it would take the string with it. A file range does
+    /// not want this: there, a neighbouring range outputs that candidate.
+    pub owned_wins_overlap: bool,
 }
 
 impl Default for View {
@@ -126,6 +131,7 @@ impl Default for View {
             stop: u64::MAX,
             cuts: false,
             utf16le_past_stop: false,
+            owned_wins_overlap: false,
         }
     }
 }
@@ -318,12 +324,17 @@ impl OutputState {
                     } else if b_end <= a.offset {
                         self.finish_parity(1)?;
                     } else {
-                        let prefer_a = crate::scanner::utf16le::prefer_candidate(
-                            a.flags & 8 != 0,
-                            a.cb,
-                            b.flags & 8 != 0,
-                            b.cb,
-                        );
+                        let (a_owned, b_owned) = (self.view.owns(a.offset), self.view.owns(b.offset));
+                        let prefer_a = if self.view.owned_wins_overlap && a_owned != b_owned {
+                            a_owned
+                        } else {
+                            crate::scanner::utf16le::prefer_candidate(
+                                a.flags & 8 != 0,
+                                a.cb,
+                                b.flags & 8 != 0,
+                                b.cb,
+                            )
+                        };
                         self.discard_parity[usize::from(prefer_a)] = true;
                         if a_end <= b_end {
                             self.finish_parity(0)?;
