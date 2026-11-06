@@ -133,7 +133,7 @@ fn spawn_cancel_watchdog(cancelled: Arc<AtomicBool>, temp_dir: Option<PathBuf>) 
         if let Some(temp_dir) = temp_dir {
             let _ = std::fs::remove_dir_all(temp_dir);
         }
-        eprintln!("error: cancelled");
+        // Nothing is printed: stderr can block as well.
         std::process::exit(1);
     });
 }

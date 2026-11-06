@@ -152,3 +152,30 @@ fn a_termination_request_ends_a_run_blocked_on_its_output() {
         .unwrap();
     assert_terminates(&mut child, temp.path());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_termination_request_ends_a_run_whose_stderr_is_full() {
+    use std::os::fd::AsRawFd;
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
+    while writer.write(&[0; 4096]).is_ok() {}
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pstrings"))
+        .args(["-c", "4K", "-j", "1", "--temp-dir"])
+        .arg(temp.path())
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(writer))
+        .spawn()
+        .unwrap();
+    let pipe = child.stdin.take().unwrap();
+    assert_terminates(&mut child, temp.path());
+    drop((pipe, reader));
+}
