@@ -41,25 +41,28 @@ impl Spilled {
         let mut block = vec![0; self.len.min(64 * 1024) as usize];
         let (mut pos, mut cb, mut cch) = (0u64, 0u64, 0u64);
         while pos < self.len {
-            let at = pos % block.len() as u64;
-            if at == 0 {
-                let len = (self.len - pos).min(block.len() as u64) as usize;
-                crate::scanner::read_exact_at(&self.file, &mut block[..len], self.start + pos)?;
+            let len = (self.len - pos).min(block.len() as u64) as usize;
+            crate::scanner::read_exact_at(&self.file, &mut block[..len], self.start + pos)?;
+            // A character may run past the block: only its lead byte is read,
+            // and stepping over it leaves `at` on the next character.
+            let mut at = 0;
+            while at < len {
+                let (text_len, source_len) = match block[at] {
+                    0..=0x7f => (1, 2),
+                    0x80..=0xdf => (2, 2),
+                    0xe0..=0xef => (3, 2),
+                    _ => (4, 4),
+                };
+                if cb + source_len > max_cb {
+                    self.len = pos + at as u64;
+                    return Ok(cch);
+                }
+                at += text_len;
+                cb += source_len;
+                cch += 1;
             }
-            let (text_len, source_len) = match block[at as usize] {
-                0..=0x7f => (1, 2),
-                0x80..=0xdf => (2, 2),
-                0xe0..=0xef => (3, 2),
-                _ => (4, 4),
-            };
-            if cb + source_len > max_cb {
-                break;
-            }
-            pos += text_len;
-            cb += source_len;
-            cch += 1;
+            pos += at as u64;
         }
-        self.len = pos;
         Ok(cch)
     }
 }
@@ -444,6 +447,29 @@ mod tests {
                 tail.data.write_payload(&mut actual_tail).unwrap();
             }
             assert_eq!(actual_tail, expected_tail, "{encoding:?}");
+        }
+    }
+
+    #[test]
+    fn cutting_text_keeps_its_place_across_read_blocks() {
+        // 3-byte characters leave the blocks misaligned, and a 4-byte one
+        // straddles the first block's end.
+        let text = format!("{}𠀀{}{}", "漢".repeat(21845), "é".repeat(30000), "a".repeat(30000));
+        assert!(text.is_char_boundary(65535) && !text.is_char_boundary(65536));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        for keep in [21845, 21846, 21847, 51846, 51847, 60000, 81846] {
+            let mut data = Spilled {
+                file: file.try_clone().unwrap(),
+                start: 0,
+                len: text.len() as u64,
+                raw: false,
+                ascii: false,
+            };
+            let expected: String = text.chars().take(keep).collect();
+            let source_len = expected.encode_utf16().count() as u64 * 2;
+            assert_eq!(data.cut_utf16_text(source_len).unwrap(), keep as u64);
+            assert_eq!(data.len, expected.len() as u64, "keep={keep}");
         }
     }
 
