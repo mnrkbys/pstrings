@@ -47,8 +47,8 @@ const AUTO_MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 /// to derive a size from, and each worker holds a whole chunk in memory.
 pub(crate) const STREAM_CHUNK_SIZE: u64 = AUTO_MIN_CHUNK_SIZE;
 
-/// One contiguous byte range of the input file, identified by absolute
-/// file offset.
+/// One contiguous byte range of the input, identified by its offset from the
+/// start of the input the scanners were given (see `scanner::ByteSource`).
 ///
 /// Deliberately just a range and not a buffer: scanners read their own
 /// bytes from the file with positioned reads (see `scanner::read_at_once`)
@@ -56,7 +56,7 @@ pub(crate) const STREAM_CHUNK_SIZE: u64 = AUTO_MIN_CHUNK_SIZE;
 /// against one shared `File` with no seeking and no shared cursor.
 #[derive(Debug)]
 pub struct Chunk {
-    /// Absolute offset of the first byte, from the start of the file.
+    /// Offset of the first byte, from the start of the input.
     pub(crate) offset: u64,
     /// Length in bytes. The final chunk of a file is short: callers clamp
     /// it against the file length rather than letting it run past EOF.

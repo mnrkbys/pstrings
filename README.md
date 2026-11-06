@@ -140,7 +140,38 @@ pstrings -o output.txt input.bin -e utf16le -f kanji-jis1,cjkpunct,hiragana,kata
 pstrings -o output.txt input.bin -e cp932
 pstrings -j 8 -o output.txt input.bin
 pstrings -o output.txt --temp-dir D:\PathToSsdOrFastDrive input.bin
+pstrings -o "output-{encoding}.tsv" -e ascii,utf16le input.bin
+pstrings --offset 0x100000 --length 64M input.bin
+read_image | pstrings -
+read_regions | pstrings --segments regions.tsv -
 ```
+
+### Extracting part of an input
+
+`--offset` and `--length` give a range of a file. A range outputs the strings of
+the whole file that start in it, at their file offsets, so extracting consecutive
+ranges gives the same lines as extracting the file at once, for strings no longer
+than `--extend-limit` bytes. A longer string is cut by the range it starts in, and
+the rest of it is not output. To find what belongs to the range, up to
+`max(--extend-limit, 64 KiB)` bytes before it are read for every encoding, and
+UTF-16LE (`-e utf16le`) is also read that far past the limit: which of two
+overlapping candidates is kept depends on their full lengths. CP932-like encodings
+and ISO-2022-JP find character boundaries from a byte that cannot be part of a
+string, which has to lie in the bytes read before the range for the result to
+match the whole file.
+
+`--segments` describes standard input as pieces from unrelated places, such as the
+unallocated parts of a volume. Each piece is extracted on its own: nothing precedes
+it, and no string continues into the next one. The input is one line per piece,
+`<base_offset>\t<owned_length>\t<extension_length>` in decimal.
+
+`cut_strings` in `--stats` counts output strings that reached the limit (within one
+character of it), which includes a string ending there by itself. When the end of
+the file is reached first, nothing is counted.
+
+`-e utf16le` and `-e utf16le-ascii` print the same label, so a line both would
+print is printed once when they share an output. With `{encoding}` in `-o` each
+gets its own file, which holds what that encoding gives on its own.
 
 
 ## Arguments/Options
@@ -150,22 +181,24 @@ pstrings -o output.txt --temp-dir D:\PathToSsdOrFastDrive input.bin
 
 Parallel strings extractor for very large files
 
-Usage: pstrings.exe [OPTIONS] <INPUT>
+Usage: pstrings [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>
-          Input file
+          Input file, or - to read a stream from standard input. A stream is read once, in order, and never written to disk; the output is the same as for a file holding the same bytes
 
 Options:
   -s, --string-only
           Omit the offset and encoding columns, printing only the matched text
 
   -o, --output <OUTPUT>
-          Output file. [default: stdout]
+          Output file. [default: stdout]. A path containing {encoding} is a
+          template: each encoding goes to its own file, named by replacing
+          {encoding} with its -e name, as if extracted on its own.
 
   -e, --encoding <ENCODING>
           Input encoding(s), repeated or comma-separated. [default: ascii, utf16le-ascii]
-
+          
           [possible values: ascii, utf16le-ascii, utf16le, utf8, iso2022-jp, cp932, gbk, euc-kr, windows-1251, big5, gb18030]
 
   -f, --filter <FILTER>
@@ -173,7 +206,7 @@ Options:
           Repeat the option or comma-separate to select multiple; a
           character is kept if any selected filter allows it.
           [default: ascii].
-
+          
           A "string" in a binary file is a guess, and most encodings can
           check the guess themselves: UTF-8 has strict well-formedness
           rules, and the CJK multi-byte encodings only accept sequences
@@ -183,37 +216,37 @@ Options:
           report most of the file as text. Narrowing pays off sharply: if a
           fraction p of characters are admitted, false positives scale as
           p^min-length.
-
+          
             utf16le, windows-1251   essential, as above
             ascii, utf16le-ascii    only picks ascii vs. ascii,latin1
             all others              ignored (they validate structurally)
-
+          
           So dropping ascii to quiet utf16le will not silently narrow utf8,
           cp932, gbk, gb18030, euc-kr, big5 or iso2022-jp -- they always
           match plain ASCII regardless.
-
+          
           Only ascii and latin1 have a single-byte form and cyrillic is also
           wired into windows-1251; every other filter is useful only with
           -e utf16le. The three kanji filters are nested, narrowest first:
           kanji-jis1, kanji-jis2, kanji.
-
+          
           printable goes the other way: it admits everything except
           controls, surrogates and private use, for pulling out all the text
           and narrowing it down afterwards. It admits 87% of the BMP, so
           expect roughly half of any random binary region to match at the
           default -m 4 -- raise -m well above that when using it.
-
+          
           EXAMPLES
-
+          
             Japanese in a UTF-16LE binary:
               -e utf16le -f kanji-jis1,hiragana,katakana,cjkpunct
-
+          
             Russian text in a windows-1251 file:
               -e windows-1251 -f ascii,cyrillic
-
+          
             Western European text, single-byte:
               -e ascii -f ascii,latin1
-
+          
             Everything, to filter yourself later:
               -e utf16le -f printable -m 12
 
@@ -234,7 +267,7 @@ Options:
 
   -m, --min-length <MIN_LENGTH>
           Minimum number of decoded characters (cch). Must be at least 1
-
+          
           [default: 4]
 
   -j, --jobs <JOBS>
@@ -242,8 +275,45 @@ Options:
 
   -c, --chunk-size <CHUNK_SIZE>
           Chunk size: K/M/G/T suffixes, or "auto"
-
+          
           [default: auto]
+
+      --offset <OFFSET>
+          Start of the file range to extract, as a byte offset. Only strings
+          starting in the range are output, and their offsets stay relative to
+          the start of the file. A string that started before the range belongs
+          to the range before, so it is not output, even in part. To tell, up
+          to max(--extend-limit, 64 KiB) bytes before the offset are read, for
+          every encoding; CP932-like encodings need a byte that cannot be part
+          of a character within those bytes to find character boundaries.
+          Accepts decimal, 0x hexadecimal, and K/M/G/T suffixes. Must be before
+          the end of the file. Not available with -.
+
+      --length <LENGTH>
+          Length of the file range in bytes: how much of the file the range
+          owns, not how much is read. A string starting in the range is read
+          past its end, up to --extend-limit. [default: to the end of the file]
+          Accepts the same forms as --offset. Must be > 0. A range running past
+          the end of the file stops there.
+
+      --extend-limit <EXTEND_LIMIT>
+          How far past the end of a --length range a string may run. A longer
+          string is cut there, and --stats counts it; the rest of it is not
+          output by any range. Accepts the same forms as --offset. [default: 64K]
+
+      --segments <SEGMENTS>
+          With -: declares that standard input is a series of segments, each
+          given by one line of this file, in order:
+          
+            <base_offset>\t<owned_length>\t<extension_length>     (decimal)
+          
+          Standard input must hold exactly owned_length + extension_length
+          bytes per segment, back to back. A string is output if it starts in
+          the owned part, at offset base_offset + its position in the segment.
+          It may run into the extension, and is cut at the segment's end, which
+          --stats counts when the extension is not empty. No string crosses
+          into the next segment. Owned parts must be in ascending order and
+          must not overlap.
 
       --keep-temp
           Keep intermediate chunk result files for debugging
@@ -286,3 +356,7 @@ length. It trades memory for temporary disk space and I/O. A long run may need
 space for its source bytes, decoded text, and queued output while it is being
 resolved. Use `--temp-dir` to select a filesystem with enough free space. These
 spool files are removed when their records or output state are dropped.
+
+Standard input is held in memory one chunk per worker, and a chunk is released when
+its scan completes. Its bytes are never written to disk, though the strings found
+in it are, as for any input. `--chunk-size auto` means 16 MiB for standard input.
