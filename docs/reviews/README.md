@@ -32,9 +32,16 @@
 
 | Campaign | Integration Branch | State | Frozen Base | Last Integrated Target | History / Notes |
 | --- | --- | --- | --- | --- | --- |
-| CA-001 | — | Active | — | — | CR-001–CR-007 approved F-0001–F-0008 at exact branch targets; integration import and Integration Range review are pending. |
+| CA-001 | CA-001-integration | Active | 79bcef84640204189bb7d7161124d1c15baf004c | fbcf61604d1644a858f22da4c58dfb2cb0e74710 | Seven independently approved remediation branches imported; awaiting independent Integration Range CR. |
 
 ## Integrated Branches
 
 | Campaign | Remediation Branch | Integrated Target | History / Notes |
 | --- | --- | --- | --- |
+| CA-001 | fix/F-0001-preserve-input | 08e4ff527b873973365f2369045d0c20fa7c1f1d | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0002-F-0003-output-state | 472d940fbc569b66e5425373fb15baf5a62ff781 | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0004-global-utf16-parity | f29024795fc6335c644c1ac806970018b4306018 | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0005-bound-inflight-chunks | 3da034e5af0de1dd45bbdd24c8c3d5ea63a517e3 | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0006-bounded-records | afd94f86ff493f259a7de1c75d2f6600a6b5202d | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0007-odd-length-input | 9097d0c8122134a268d5f00b80a6085541c658f7 | Imported the exact independently approved branch Target. |
+| CA-001 | fix/F-0008-cancellation-report | bb46f60f739b55148e8457a3b2b0efe7d15bec3b | Imported the exact independently approved branch Target. |
