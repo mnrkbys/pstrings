@@ -1,5 +1,9 @@
 # pstrings
 
+Version 0.2.0 is a personal fork maintained by mnrkbys, based on
+[upstream pstrings v0.1.46](https://github.com/herosi/pstrings/tree/v0.1.46).
+This fork is maintained independently of the upstream project.
+
 ## pstrings - Parallel strings extractor for very large files
 
 
