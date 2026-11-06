@@ -9,6 +9,8 @@
 | CA-001 | Codebase Audit | CA-001 | Codex | — | 1f6b267e | a299a58f | 2026-10-23 | [CA-001.md](CA-001.md) |
 | CR-001 | Code Review | CA-001 | Codex | — | 376d1de1 | 472d940f | 2026-11-06 | [CR-001.md](CR-001.md) |
 | CR-002 | Code Review | CA-001 | Codex | CR-001 | 376d1de1 | 08e4ff52 | 2026-11-06 | [CR-002.md](CR-002.md) |
+| CR-003 | Code Review | CA-001 | Codex | CR-002 | 376d1de1 | 3da034e5 | 2026-11-06 | [CR-003.md](CR-003.md) |
+
 ## Findings
 
 | Finding | Introduced By | Legacy Refs | Remediation Origin | Blocks | Category | Severity | Status | Disposition | Branch | Approved Target | Summary | Fixed By | History / Notes |
@@ -17,7 +19,7 @@
 | F-0002 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 保留レコードより後の結果を先に出しオフセット順を崩す | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
 | F-0003 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 符号化ごとでない境界判定が文字列を欠落・分割させる | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
 | F-0004 | CA-001 | — | — | — | Code;Test | P1 | Open | — | — | — | チャンク内だけの UTF-16LE 偶奇選別が正しい末尾を捨てる | — | チャンク幅 8 で「あいうえお」が「あいうえ」になる。 |
-| F-0005 | CA-001 | — | — | — | Code;Test | P2 | Open | — | — | — | 先行完了チャンクを無制限に保持し FD を使い切る | — | NOFILE=64、4 workers で EMFILE。同じ入力・上限で 1 worker は成功。 |
+| F-0005 | CA-001 | — | — | — | Code;Test | P2 | Ready for Integration | — | `fix/F-0005-bound-inflight-chunks` | 3da034e5af0de1dd45bbdd24c8c3d5ea63a517e3 | 先行完了チャンクを無制限に保持し FD を使い切る | 3da034e5 | CR-003 passed at the exact branch target; the low-file-descriptor regression succeeds with one and four workers. |
 | F-0006 | CA-001 | — | — | F-0004 | Code;Test | P2 | Open | — | — | — | 長い run の境界連結が入力全体をメモリへ蓄積する | — | 1 worker・1 MiB chunks でも 64 MiB の連続 ASCII に peak RSS 132.89 MiB。 |
 | F-0007 | CA-001 | — | — | — | Code;Test | P2 | Open | — | — | — | 入力長へのクランプで偶数のチャンク指定を誤って拒否する | — | 9 バイトの UTF-16LE 入力で auto は成功、64 は偶数制約エラー。 |
 | F-0008 | CA-001 | — | — | — | Code;Test | P3 | Open | — | — | — | SIGINT のチャネル切断をキャンセルより先に故障として報告する | — | 非ゼロで停止するが、5 回中 2 回でワーカー欠落という誤った理由になった。 |
