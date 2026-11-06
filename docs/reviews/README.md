@@ -8,12 +8,12 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | CA-001 | Codebase Audit | CA-001 | Codex | — | 1f6b267e | a299a58f | 2026-10-23 | [CA-001.md](CA-001.md) |
 | CR-001 | Code Review | CA-001 | Codex | — | 376d1de1 | 472d940f | 2026-11-06 | [CR-001.md](CR-001.md) |
-
+| CR-002 | Code Review | CA-001 | Codex | CR-001 | 376d1de1 | 08e4ff52 | 2026-11-06 | [CR-002.md](CR-002.md) |
 ## Findings
 
 | Finding | Introduced By | Legacy Refs | Remediation Origin | Blocks | Category | Severity | Status | Disposition | Branch | Approved Target | Summary | Fixed By | History / Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| F-0001 | CA-001 | — | — | — | Code;Test | P1 | Open | — | — | — | 入力と同じ実体への出力で入力を切り詰める | — | 同一パス・symlink・hardlink の 3 ケースで入力が 0 バイトになることを再現。 |
+| F-0001 | CA-001 | — | — | — | Code;Test | P1 | Ready for Integration | — | `fix/F-0001-preserve-input` | 08e4ff527b873973365f2369045d0c20fa7c1f1d | 入力と同じ実体への出力で入力を切り詰める | 08e4ff52 | CR-002 passed at the exact branch target; same-file protection preserves input bytes for path and link aliases. |
 | F-0002 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 保留レコードより後の結果を先に出しオフセット順を崩す | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
 | F-0003 | CA-001 | — | — | F-0006 | Code;Test | P1 | Ready for Integration | — | `fix/F-0002-F-0003-output-state` | 472d940fbc569b66e5425373fb15baf5a62ff781 | 符号化ごとでない境界判定が文字列を欠落・分割させる | 472d940f | CR-001 passed at the exact target. This change is a prerequisite for F-0006. |
 | F-0004 | CA-001 | — | — | — | Code;Test | P1 | Open | — | — | — | チャンク内だけの UTF-16LE 偶奇選別が正しい末尾を捨てる | — | チャンク幅 8 で「あいうえお」が「あいうえ」になる。 |
