@@ -123,7 +123,7 @@ fn process_chunk(
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
 ) -> io::Result<ChunkResult> {
-    let Work { index, source, chunk, input_len, view } = work;
+    let Work { index, source, chunk, input_len, view, ends_view } = work;
     let mut files = Vec::new();
 
     for encoding in cfg.encodings() {
@@ -160,7 +160,7 @@ fn process_chunk(
     let merged_file = merge_chunk_encodings(files, &merged_path, cancelled, cfg)?;
     detailed_stats.add_merge(merge_started.elapsed());
 
-    Ok(ChunkResult { file: merged_file, chunk, view })
+    Ok(ChunkResult { file: merged_file, chunk, view, ends_view })
 }
 
 // A permit survives scanning and queueing until the outputter consumes the
@@ -197,6 +197,7 @@ struct ChunkResult {
     file: File,
     chunk: Chunk,
     view: View,
+    ends_view: bool,
 }
 
 type WorkerResult = (u64, ChunkResult, ChunkPermit);
@@ -382,6 +383,14 @@ fn run_output_stage(
             break;
         }
 
+        if result.ends_view
+            && let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.str_only())
+        {
+            output_error = Some(e);
+            cancelled.store(true, Ordering::SeqCst);
+            break;
+        }
+
         output_processing += output_processing_started.elapsed();
 
         next_output_chunk += 1;
@@ -541,6 +550,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if from_stdin && (args.offset().is_some() || args.length().is_some() || args.extend_limit().is_some()) {
         return Err("--offset, --length and --extend-limit need a file, not -".into());
     }
+    if args.segments().is_some() && !from_stdin {
+        return Err("--segments needs - as the input".into());
+    }
+    let segments = args
+        .segments()
+        .map(|path| parse_segments(io::BufReader::new(File::open(path)?)).map_err(Box::<dyn std::error::Error>::from))
+        .transpose()?;
     let range = if from_stdin {
         None
     } else {
@@ -564,7 +580,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let window = Arc::new(FileWindow { file, start: range.start });
             Feed::file(window, range.len, cfg.chunk_size(), range.view)
         }
-        _ => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
+        _ => match segments {
+            Some(segments) => Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), segments),
+            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
+        },
     });
 
     let (handles, rx) = spawn_workers(

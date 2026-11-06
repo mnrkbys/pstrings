@@ -5,7 +5,7 @@ use crate::chunk::{Chunk, STREAM_CHUNK_SIZE};
 use crate::outputter::View;
 use crate::scanner::ByteSource;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -84,6 +84,46 @@ pub fn plan_file_range(
     })
 }
 
+/// One line of a `--segments` file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Segment {
+    pub base_offset: u64,
+    pub owned_length: u64,
+    pub extension_length: u64,
+}
+
+/// Reads a `--segments` file: `<base_offset>\t<owned_length>\t<extension_length>`
+/// per line, in decimal. Output is sorted because each segment's owned range
+/// has to end before the next one starts.
+pub fn parse_segments(input: impl BufRead) -> Result<Vec<Segment>, String> {
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut owned_end = 0;
+    for (index, line) in input.lines().enumerate() {
+        let number = index + 1;
+        let line = line.map_err(|e| format!("--segments: {e}"))?;
+        let fields: Vec<_> = line.split('\t').map(str::parse::<u64>).collect();
+        let [Ok(base_offset), Ok(owned_length), Ok(extension_length)] = fields[..] else {
+            return Err(format!("--segments line {number}: expected three decimal numbers separated by tabs"));
+        };
+        if base_offset < owned_end {
+            return Err(format!(
+                "--segments line {number}: base_offset {base_offset} is before the end of the previous segment ({owned_end})"
+            ));
+        }
+        owned_end = base_offset
+            .checked_add(owned_length)
+            .ok_or_else(|| format!("--segments line {number}: owned range overflows"))?;
+        owned_length
+            .checked_add(extension_length)
+            .ok_or_else(|| format!("--segments line {number}: segment length overflows"))?;
+        segments.push(Segment { base_offset, owned_length, extension_length });
+    }
+    if segments.is_empty() {
+        return Err("--segments: no segments".into());
+    }
+    Ok(segments)
+}
+
 /// A file seen from `start`, so that the start of a range is the start of the
 /// input to the scanners.
 pub struct FileWindow {
@@ -105,6 +145,9 @@ pub struct Work {
     pub chunk: Chunk,
     pub input_len: u64,
     pub view: View,
+    /// Whether nothing after this chunk belongs to `view`, so that strings
+    /// still open at its end are over.
+    pub ends_view: bool,
 }
 
 /// A slice of a stream. Offsets are those of the stream as a whole.
@@ -144,8 +187,16 @@ impl FileFeed {
             chunk: Chunk::new(offset, self.chunk_size.min(self.len - offset)),
             input_len: self.len,
             view: self.view,
+            ends_view: false,
         })
     }
+}
+
+/// A stretch of a stream scanned as if it were an input of its own.
+struct Region {
+    /// `None` until the stream ends.
+    len: Option<u64>,
+    view: View,
 }
 
 /// Reads a stream strictly in order, so each worker holds one chunk at most
@@ -156,9 +207,11 @@ struct StreamFeed {
     reader: Box<dyn Read + Send>,
     chunk_size: u64,
     next_index: u64,
-    /// Offset of the next chunk.
+    regions: std::vec::IntoIter<Region>,
+    region: Option<Region>,
+    /// Offset of the next chunk in the region.
     pos: u64,
-    /// The bytes read so far that a later chunk still needs.
+    /// The bytes read so far that a later chunk of the region still needs.
     buffer: StreamBuffer,
 }
 
@@ -175,35 +228,69 @@ impl StreamFeed {
         Ok(())
     }
 
-    fn next(&mut self) -> io::Result<Option<Work>> {
-        self.fill_to(self.pos + self.chunk_size + CONTEXT)?;
-        let input_len = self.buffer_end();
-        let len = self.chunk_size.min(input_len - self.pos);
-        if len == 0 {
-            if self.pos == 0 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "empty input"));
-            }
-            return Ok(None);
-        }
-
-        let chunk = Chunk::new(self.pos, len);
-        self.pos += len;
-        let keep_from = self.pos.saturating_sub(CONTEXT).max(self.buffer.start);
-        let tail = self.buffer.bytes[(keep_from - self.buffer.start) as usize..].to_vec();
-        let bytes = std::mem::replace(&mut self.buffer.bytes, tail);
-        let source = StreamBuffer { start: self.buffer.start, bytes };
-        self.buffer.start = keep_from;
-
-        let index = self.next_index;
-        self.next_index += 1;
-        Ok(Some(Work {
-            index,
-            source: Arc::new(source),
-            chunk,
-            input_len,
-            view: View::default(),
-        }))
+    fn next_region(&mut self) {
+        self.region = self.regions.next();
+        self.pos = 0;
+        self.buffer = StreamBuffer { start: 0, bytes: Vec::new() };
     }
+
+    fn next(&mut self) -> io::Result<Option<Work>> {
+        loop {
+            let Some(region) = &self.region else {
+                return self.check_stream_ended().map(|()| None);
+            };
+            let (region_len, view) = (region.len, region.view);
+            let wanted = self.pos + self.chunk_size + CONTEXT;
+            self.fill_to(region_len.map_or(wanted, |len| len.min(wanted)))?;
+            let input_len = self.buffer_end();
+            if region_len.is_some_and(|len| input_len < len.min(wanted)) {
+                return Err(invalid("standard input is shorter than the declared segments"));
+            }
+            let len = self.chunk_size.min(input_len - self.pos);
+            if len == 0 {
+                if region_len.is_none() && self.pos == 0 {
+                    return Err(invalid("empty input"));
+                }
+                self.next_region();
+                continue;
+            }
+
+            let chunk = Chunk::new(self.pos, len);
+            self.pos += len;
+            let keep_from = self.pos.saturating_sub(CONTEXT).max(self.buffer.start);
+            let tail = self.buffer.bytes[(keep_from - self.buffer.start) as usize..].to_vec();
+            let bytes = std::mem::replace(&mut self.buffer.bytes, tail);
+            let source = StreamBuffer { start: self.buffer.start, bytes };
+            self.buffer.start = keep_from;
+
+            let ends_view = region_len == Some(self.pos);
+            if ends_view {
+                self.next_region();
+            }
+            let index = self.next_index;
+            self.next_index += 1;
+            return Ok(Some(Work {
+                index,
+                source: Arc::new(source),
+                chunk,
+                input_len,
+                view,
+                ends_view,
+            }));
+        }
+    }
+
+    fn check_stream_ended(&mut self) -> io::Result<()> {
+        match self.reader.read(&mut [0]) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err(invalid("standard input is longer than the declared segments")),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 enum Kind {
@@ -234,15 +321,46 @@ impl Feed {
         }
     }
 
+    /// A stream that is one input of unknown length.
     pub fn stream(reader: Box<dyn Read + Send>, chunk_size: u64) -> Self {
+        let region = Region { len: None, view: View::default() };
+        Self::stream_of(reader, chunk_size, vec![region])
+    }
+
+    /// A stream that is `segments` back to back. Strings end with their
+    /// segment, as the next one's bytes come from somewhere else.
+    pub fn segmented_stream(
+        reader: Box<dyn Read + Send>,
+        chunk_size: u64,
+        segments: Vec<Segment>,
+    ) -> Self {
+        let regions = segments.into_iter().map(|segment| {
+            let len = segment.owned_length + segment.extension_length;
+            let view = View {
+                base: segment.base_offset,
+                start: 0,
+                end: segment.owned_length,
+                stop: len,
+                cuts: segment.extension_length > 0,
+            };
+            Region { len: Some(len), view }
+        });
+        Self::stream_of(reader, chunk_size, regions.collect())
+    }
+
+    fn stream_of(reader: Box<dyn Read + Send>, chunk_size: u64, regions: Vec<Region>) -> Self {
+        let mut feed = StreamFeed {
+            reader,
+            chunk_size,
+            next_index: 0,
+            regions: regions.into_iter(),
+            region: None,
+            pos: 0,
+            buffer: StreamBuffer { start: 0, bytes: Vec::new() },
+        };
+        feed.next_region();
         Feed {
-            kind: Kind::Stream(Mutex::new(StreamFeed {
-                reader,
-                chunk_size,
-                next_index: 0,
-                pos: 0,
-                buffer: StreamBuffer { start: 0, bytes: Vec::new() },
-            })),
+            kind: Kind::Stream(Mutex::new(feed)),
             chunk_total: AtomicU64::new(u64::MAX),
             input_bytes: AtomicU64::new(0),
         }

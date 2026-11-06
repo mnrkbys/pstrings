@@ -20,7 +20,10 @@ pub use chunk::{auto_chunk_size, parse_size, Chunk};
 pub use config::{Args, Config};
 pub use encoding::{InputEncoding, DEFAULT_ENCODINGS};
 pub use filter::{CharacterFilter, DEFAULT_FILTERS};
-pub use input::{plan_file_range, Feed, FileRange, FileWindow, Work, DEFAULT_EXTEND_LIMIT};
+pub use input::{
+    parse_segments, plan_file_range, Feed, FileRange, FileWindow, Segment, Work,
+    DEFAULT_EXTEND_LIMIT,
+};
 pub use merger::merge_chunk_encodings;
 pub use outputter::{
     begin_emitted_counts, flush_pending, output_merged_chunk, take_emitted_counts,

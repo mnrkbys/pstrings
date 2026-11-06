@@ -141,6 +141,21 @@ pub struct Args {
     #[arg(long = "extend-limit", value_parser = parse_size, verbatim_doc_comment)]
     extend_limit: Option<u64>,
 
+    /// With -: declares that standard input is a series of segments, each
+    /// given by one line of this file, in order:
+    ///
+    ///   <base_offset>\t<owned_length>\t<extension_length>     (decimal)
+    ///
+    /// Standard input must hold exactly owned_length + extension_length
+    /// bytes per segment, back to back. A string is output if it starts in
+    /// the owned part, at offset base_offset + its position in the segment.
+    /// It may run into the extension, and is cut at the segment's end, which
+    /// --stats counts when the extension is not empty. No string crosses
+    /// into the next segment. Owned parts must be in ascending order and
+    /// must not overlap.
+    #[arg(long = "segments", verbatim_doc_comment)]
+    segments: Option<PathBuf>,
+
     /// Keep intermediate chunk result files for debugging.
     #[arg(long = "keep-temp")]
     keep_temp: bool,
@@ -179,6 +194,10 @@ impl Args {
 
     pub fn extend_limit(&self) -> Option<u64> {
         self.extend_limit
+    }
+
+    pub fn segments(&self) -> Option<&PathBuf> {
+        self.segments.as_ref()
     }
 
     pub fn output(&self) -> &Option<PathBuf> {
