@@ -1,4 +1,4 @@
-use super::read_exact_at;
+use super::{read_exact_at, ByteSource};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Broad Unicode filters can therefore still admit binary noise: choose the
 /// narrowest filter combination that covers the expected text.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
@@ -148,7 +148,7 @@ fn decode_char_at(filters: &filter::FilterSet, buf: &[u8], pos: usize) -> Option
 /// shared `scanner::emit_record` helper here -- see `scan`'s doc comment
 /// for why results are collected in memory instead).
 fn scan_parity(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
@@ -371,7 +371,7 @@ fn scan_parity(
 /// happens; `decode_char_at` then correctly treats that trailing high
 /// surrogate as unresolved (there's nothing left in the file to pair with).
 fn read_scan_block(
-    file: &File,
+    file: &dyn ByteSource,
     buf: &mut [u8],
     block_start: u64,
     n_units: u64,

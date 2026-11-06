@@ -16,6 +16,7 @@
 //! chunk boundaries.
 
 use super::dbcs::{self, Dbcs};
+use super::ByteSource;
 use super::ResolvedFragment;
 use crate::chunk::Chunk;
 use crate::config::Config;
@@ -93,7 +94,7 @@ impl Dbcs for EucKr {
 }
 
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

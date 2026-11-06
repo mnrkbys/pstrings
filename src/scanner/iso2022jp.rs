@@ -1,4 +1,4 @@
-use super::{emit_record, read_exact_at, ResolvedFragment, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, ResolvedFragment, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -430,7 +430,7 @@ impl Run {
 /// join with. Everything strictly between the leading and trailing
 /// boundary regions is decoded immediately.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

@@ -558,7 +558,7 @@ fn scan_all_chunks_dbcs(
     chunk_size: u64,
     min_cch: u64,
     name: &str,
-    scan: fn(&File, u64, &Chunk, &Config, &Path, &AtomicBool) -> std::io::Result<(u64, File)>,
+    scan: fn(&dyn crate::scanner::ByteSource, u64, &Chunk, &Config, &Path, &AtomicBool) -> std::io::Result<(u64, File)>,
 ) -> String {
     let file = File::open(input).unwrap();
     let file_len = fs::metadata(input).unwrap().len();

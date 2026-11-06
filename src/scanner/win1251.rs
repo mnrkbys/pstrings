@@ -77,7 +77,7 @@
 //! needed the same algorithm. Until then a second abstraction layer would
 //! cost more than it saves.
 
-use super::{emit_record, read_exact_at, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -185,7 +185,7 @@ fn is_text(cfg: &Config, ch: char) -> bool {
 /// `RecordData::Text` and simply concatenated by the merger; there is no
 /// `segment_raw` arm for this encoding and none is needed.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     chunk: &Chunk,
     cfg: &Config,
     temp_path: &Path,

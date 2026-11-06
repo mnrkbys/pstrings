@@ -25,7 +25,7 @@ pub use outputter::{
     write_output_record, OutputState,
 };
 pub use record::MatchRecord;
-pub use scanner::scan;
+pub use scanner::{scan, ByteSource};
 pub use stats::{format_bytes, peak_rss_bytes, DetailedStats};
 pub use tempfile_helper::TempDirGuard;
 pub use cpu_prio::set_cpu_prio;

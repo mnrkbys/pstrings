@@ -40,6 +40,7 @@
 //! quantities, as they already were for every ASCII-plus-double-byte mix.
 
 use super::dbcs::{self, Dbcs};
+use super::ByteSource;
 use super::ResolvedFragment;
 use crate::chunk::Chunk;
 use crate::config::Config;
@@ -115,7 +116,7 @@ impl Dbcs for Big5 {
 }
 
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
