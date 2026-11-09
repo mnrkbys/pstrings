@@ -201,3 +201,105 @@ fn segments_need_standard_input() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
 }
+
+/// Runs on a file holding `bytes`.
+fn run_file(bytes: &[u8], options: &[&str]) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.bin");
+    fs::write(&path, bytes).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pstrings")).args(options).arg(&path).output().unwrap();
+    lines(&out)
+}
+
+/// An even run and an odd run of 113 units each, overlapping by 11.
+fn tied_runs() -> Vec<u8> {
+    let both = |units| [0x42, 0x4e].repeat(units);
+    let mut bytes = vec![0; 4];
+    bytes.extend(both(100));
+    bytes.extend([0x42, 0, 0, 0x4e]);
+    bytes.extend(both(11));
+    bytes.extend([0, 0]);
+    bytes.extend(both(100));
+    bytes.extend([0; 4]);
+    bytes
+}
+
+#[test]
+fn a_tie_between_parities_goes_by_the_printed_offset() {
+    let runs = tied_runs();
+    let options = ["-e", "utf16le", "-f", "printable", "-m", "3"];
+    for base in [1000, 1001] {
+        let mut whole = vec![0; base];
+        whole.extend(&runs);
+        let expected = run_file(&whole, &options);
+        assert_eq!(expected.len(), 1, "{expected:?}");
+        // The run starting at an even offset in the file wins.
+        let even_start = if base % 2 == 0 { 4 } else { 207 };
+        assert!(expected[0].starts_with(&format!("{:020}\t", base + even_start)), "{expected:?}");
+        for chunk in ["8", "auto"] {
+            let segments = format!("{base}\t{}\t0\n", runs.len());
+            let out = lines(&run(&segments, &runs, &[&options[..], &["-c", chunk]].concat()));
+            assert_eq!(out, expected, "base={base} -c {chunk}");
+        }
+    }
+}
+
+#[test]
+fn segments_cut_where_no_string_crosses_match_the_whole_input() {
+    // Text readable at both parities, with candidates of equal length
+    // overlapping, in pieces separated by runs of zeros. Each segment starts
+    // inside such a run, at an odd offset.
+    let piece = |seed: u8| -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for i in 0..40u8 {
+            let units = usize::from((seed.wrapping_mul(31) ^ i.wrapping_mul(17)) % 23 + 1);
+            bytes.extend([0x42, 0x4e].repeat(units));
+            bytes.extend(if (seed ^ i) % 3 == 0 { &[0x42, 0, 0, 0x4e][..] } else { &[0, 0][..] });
+        }
+        bytes
+    };
+    let options = ["-e", "utf16le", "-f", "printable", "-m", "3"];
+    let mut whole = vec![0; 1];
+    let mut stdin = Vec::new();
+    let mut segments = String::new();
+    for seed in 0..6 {
+        whole.extend([0; 128]);
+        let base = whole.len();
+        assert_eq!(base % 2, 1);
+        let mut segment = vec![0; 128];
+        segment.extend(piece(seed));
+        segment.extend([0; 128]);
+        segments.push_str(&format!("{base}\t{}\t0\n", segment.len()));
+        whole.extend(&segment);
+        stdin.extend(segment);
+        whole.extend([0; 128]);
+    }
+    // The same segments one byte further on start at even offsets.
+    let shifted: String = segments
+        .lines()
+        .map(|line| {
+            let (base, rest) = line.split_once('\t').unwrap();
+            format!("{}\t{rest}\n", base.parse::<u64>().unwrap() + 1)
+        })
+        .collect();
+    let expected = run_file(&whole, &options);
+    let expected_shifted = run_file(&[&[0][..], &whole].concat(), &options);
+    for chunk in ["8", "64", "auto"] {
+        let options = [&options[..], &["-c", chunk, "-j", "4"]].concat();
+        assert_eq!(lines(&run(&segments, &stdin, &options)), expected, "-c {chunk}");
+        assert_eq!(lines(&run(&shifted, &stdin, &options)), expected_shifted, "-c {chunk}");
+    }
+}
+
+#[test]
+fn a_candidate_past_the_largest_offset_is_judged_without_overflow() {
+    // The candidate in the extension would print past u64::MAX; it is not
+    // output, but its parity is still decided.
+    let mut bytes = vec![0; 6];
+    bytes.extend(utf16("abcdef"));
+    bytes.extend([0; 4]);
+    let base = u64::MAX - 3;
+    let segments = format!("{base}\t2\t{}\n", bytes.len() - 2);
+    let out = run(&segments, &bytes, &["-e", "utf16le", "-m", "3"]);
+    assert_eq!(lines(&out), Vec::<String>::new());
+}

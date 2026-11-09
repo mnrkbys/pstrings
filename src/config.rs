@@ -157,8 +157,10 @@ pub struct Args {
     /// --stats counts unless the extension is empty. What remains of a cut
     /// string is subject to --min-length as usual. No string crosses into
     /// the next segment. A string starting in the owned part is kept over an
-    /// overlapping UTF-16LE candidate starting in the extension. Owned parts
-    /// must be in ascending order and must not overlap.
+    /// overlapping UTF-16LE candidate starting in the extension; otherwise
+    /// overlapping candidates are decided as in the whole input, by their
+    /// printed offsets. Owned parts must be in ascending order and must not
+    /// overlap.
     #[arg(long = "segments", verbatim_doc_comment)]
     segments: Option<PathBuf>,
 
