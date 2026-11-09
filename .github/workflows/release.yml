@@ -16,8 +16,12 @@ jobs:
         run: .github/scripts/release-notes.sh "${{ github.ref_name }}" "${{ github.repository }}" > /dev/null
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
   build:
     name: Build ${{ matrix.target }}
     needs: test
@@ -55,7 +59,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         shell: bash
         env:

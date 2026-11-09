@@ -374,8 +374,11 @@ Options:
 ## How to Build
 
 ```bash
-cargo build --release
+cargo build --release --locked
 ```
+
+`--locked` builds with the dependency versions in `Cargo.lock`, the same as the
+releases.
 
 I tested on Windows 11, Server 2025 and Ubuntu 24.04 on x64.
 
