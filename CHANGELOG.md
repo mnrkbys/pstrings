@@ -9,7 +9,7 @@ v0.1.46.
 
 A release's date is filled in when it is tagged.
 
-## [2026.11.0] - Unreleased
+## [2026.11.0] - 2026-11-09
 
 The first release of the fork. It reads from pipes, extracts parts of an input
 without copying them out, and fixes output that could depend on the chunk size,
