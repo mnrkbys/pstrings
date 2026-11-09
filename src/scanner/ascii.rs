@@ -1,4 +1,4 @@
-use super::{emit_record, read_exact_at, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// offset order -- no separate sort step is needed downstream, only a merge
 /// against the other encodings' equally-sorted outputs.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     chunk: &Chunk,
     cfg: &Config,
     temp_path: &Path,

@@ -57,6 +57,7 @@
 //! anyway) while adding a second source of truth that could drift.
 
 use super::dbcs::{self, Dbcs};
+use super::ByteSource;
 use super::ResolvedFragment;
 use crate::chunk::Chunk;
 use crate::config::Config;
@@ -144,7 +145,7 @@ impl Dbcs for Gb18030 {
 }
 
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

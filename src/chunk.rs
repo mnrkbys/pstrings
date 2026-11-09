@@ -43,8 +43,12 @@ pub(crate) const AUTO_MIN_CHUNK_SIZE: u64 = 16 * 1024 * 1024;
 /// indivisible unit one thread must finish alone.
 const AUTO_MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 
-/// One contiguous byte range of the input file, identified by absolute
-/// file offset.
+/// What "auto" means for a stream. Its length is unknown, so there is nothing
+/// to derive a size from, and each worker holds a whole chunk in memory.
+pub(crate) const STREAM_CHUNK_SIZE: u64 = AUTO_MIN_CHUNK_SIZE;
+
+/// One contiguous byte range of the input, identified by its offset from the
+/// start of the input the scanners were given (see `scanner::ByteSource`).
 ///
 /// Deliberately just a range and not a buffer: scanners read their own
 /// bytes from the file with positioned reads (see `scanner::read_at_once`)
@@ -52,7 +56,7 @@ const AUTO_MAX_CHUNK_SIZE: u64 = 256 * 1024 * 1024;
 /// against one shared `File` with no seeking and no shared cursor.
 #[derive(Debug)]
 pub struct Chunk {
-    /// Absolute offset of the first byte, from the start of the file.
+    /// Offset of the first byte, from the start of the input.
     pub(crate) offset: u64,
     /// Length in bytes. The final chunk of a file is short: callers clamp
     /// it against the file length rather than letting it run past EOF.
@@ -62,6 +66,14 @@ pub struct Chunk {
 impl Chunk {
     pub fn new(offset: u64, len: u64) -> Self {
         Chunk { offset, len }
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
     }
 }
 
@@ -123,8 +135,9 @@ pub fn auto_chunk_size(file_len: u64, jobs: usize) -> u64 {
 ///
 /// A single trailing `K`, `M`, `G` or `T` (either case) multiplies by the
 /// corresponding power of 1024 -- these are binary units, so `1K` is 1024
-/// bytes, not 1000. With no suffix the value is a plain byte count.
-/// Surrounding whitespace is ignored.
+/// bytes, not 1000. With no suffix the value is a plain byte count. The
+/// number is decimal, or hexadecimal with a `0x` prefix. Surrounding
+/// whitespace is ignored.
 ///
 /// # Errors
 ///
@@ -148,7 +161,11 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
         _ => (s, 1),
     };
 
-    let n: u64 = num.parse().map_err(|_| format!("invalid size: {s}"))?;
+    let (digits, radix) = match num.strip_prefix("0x").or_else(|| num.strip_prefix("0X")) {
+        Some(hex) => (hex, 16),
+        None => (num, 10),
+    };
+    let n = u64::from_str_radix(digits, radix).map_err(|_| format!("invalid size: {s}"))?;
 
     n.checked_mul(mul)
         .ok_or_else(|| format!("size overflow: {s}"))

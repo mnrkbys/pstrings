@@ -38,7 +38,7 @@ use std::sync::atomic::AtomicBool;
 /// added to `segment_raw` below so `outputter` can resolve them.
 pub fn scan(
     encoding: InputEncoding,
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
@@ -107,37 +107,36 @@ pub(crate) fn segment_raw(encoding: InputEncoding, bytes: &[u8]) -> (Vec<Resolve
     }
 }
 
-// The two helpers below let every scanner read its
-// regions directly by absolute file offset via positioned reads (pread /
-// seek_read), rather than holding a `&mut File` and seeking + reading
-// sequentially. This matters because chunks may be processed concurrently
-// against the same open `File`: a shared `&File` combined with positioned
-// reads means no thread ever has to seek the shared file cursor, so scans
-// of different chunks can safely run in parallel on separate threads.
-
-/// Platform-specific positioned read: reads into `buf` starting at absolute
-/// file `offset`, without touching (or depending on) the file's current
-/// cursor position. Returns however many bytes were actually read in this
-/// one underlying syscall (may be less than `buf.len()`).
-#[cfg(unix)]
-fn read_at_once(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+/// Bytes a scanner can read by position.
+///
+/// Offsets are relative to the start of the scanned input, which is not
+/// always the start of a file: see `input`. Positioned reads leave no shared
+/// cursor, so chunks can be scanned concurrently against one source.
+pub trait ByteSource: Send + Sync {
+    /// Reads into `buf` from `offset`, returning how many bytes were read
+    /// (possibly fewer than `buf.len()`, and 0 at the end of the source).
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
 }
 
-#[cfg(windows)]
-fn read_at_once(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+impl ByteSource for File {
+    #[cfg(unix)]
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        std::os::unix::fs::FileExt::read_at(self, buf, offset)
+    }
+
+    #[cfg(windows)]
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        std::os::windows::fs::FileExt::seek_read(self, buf, offset)
+    }
 }
 
-/// Like `read_at_once`, but guarantees `buf` is fully filled (looping over
-/// short reads, which positioned reads can return even without hitting
-/// EOF), or returns an `UnexpectedEof` error if the file ends before `buf`
-/// is full. Scanners use this as their basic "read this many bytes from
-/// this offset" primitive.
-pub(crate) fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+/// Fills `buf` from `offset`, looping over short reads, or returns an
+/// `UnexpectedEof` error if the source ends first. Scanners use this as their
+/// basic "read this many bytes from this offset" primitive.
+pub(crate) fn read_exact_at(file: &dyn ByteSource, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let mut done = 0usize;
     while done < buf.len() {
-        let n = read_at_once(file, &mut buf[done..], offset + done as u64)?;
+        let n = file.read_at(&mut buf[done..], offset + done as u64)?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,

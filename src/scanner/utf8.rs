@@ -1,4 +1,4 @@
-use super::{emit_record, read_exact_at, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -270,7 +270,7 @@ impl Run {
 /// itself as touching the chunk boundary and can be joined with the
 /// previous chunk's pending fragment by the merger.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

@@ -57,7 +57,7 @@
 //! copy. Duplicated logic is where divergence hides, so the engine lives
 //! here once and the per-encoding differences are expressed as data.
 
-use super::{emit_record, read_exact_at, ResolvedFragment, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, ResolvedFragment, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -415,7 +415,7 @@ impl Run {
 /// scanned and decoded immediately; only at most two runs per chunk ever
 /// take the deferred path.
 pub(crate) fn scan<E: Dbcs>(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

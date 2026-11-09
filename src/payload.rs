@@ -32,6 +32,41 @@ impl Spilled {
     }
 }
 
+impl Spilled {
+    /// Shortens text decoded from UTF-16LE to the characters that fit in
+    /// `max_cb` source bytes, returning how many characters remain. Only the
+    /// UTF-8 lead bytes are needed: 4-byte characters came from surrogate
+    /// pairs and every other character from one code unit.
+    pub fn cut_utf16_text(&mut self, max_cb: u64) -> io::Result<u64> {
+        let mut block = vec![0; self.len.min(64 * 1024) as usize];
+        let (mut pos, mut cb, mut cch) = (0u64, 0u64, 0u64);
+        while pos < self.len {
+            let len = (self.len - pos).min(block.len() as u64) as usize;
+            crate::scanner::read_exact_at(&self.file, &mut block[..len], self.start + pos)?;
+            // A character may run past the block: only its lead byte is read,
+            // and stepping over it leaves `at` on the next character.
+            let mut at = 0;
+            while at < len {
+                let (text_len, source_len) = match block[at] {
+                    0..=0x7f => (1, 2),
+                    0x80..=0xdf => (2, 2),
+                    0xe0..=0xef => (3, 2),
+                    _ => (4, 4),
+                };
+                if cb + source_len > max_cb {
+                    self.len = pos + at as u64;
+                    return Ok(cch);
+                }
+                at += text_len;
+                cb += source_len;
+                cch += 1;
+            }
+            pos += at as u64;
+        }
+        Ok(cch)
+    }
+}
+
 impl RecordData {
     pub fn payload_len(&self) -> u64 {
         match self {
@@ -63,6 +98,53 @@ impl RecordData {
             Self::Raw(b) => out.write_all(b),
             Self::Spilled(s) => s.copy_to(out),
         }
+    }
+
+    fn read_payload_at(&self, buf: &mut [u8], pos: u64) -> io::Result<()> {
+        let bytes = match self {
+            Self::Text(s) => s.as_bytes(),
+            Self::Raw(b) => b,
+            Self::Spilled(s) => return crate::scanner::read_exact_at(&s.file, buf, s.start + pos),
+        };
+        buf.copy_from_slice(&bytes[pos as usize..pos as usize + buf.len()]);
+        Ok(())
+    }
+
+    /// Compares payloads a block at a time, as either may be spilled.
+    pub fn same_payload(&self, other: &Self) -> io::Result<bool> {
+        let len = self.payload_len();
+        if len != other.payload_len() {
+            return Ok(false);
+        }
+        let size = len.min(64 * 1024) as usize;
+        let (mut a, mut b) = (vec![0; size], vec![0; size]);
+        let mut pos = 0;
+        while pos < len {
+            let block = (len - pos).min(size as u64) as usize;
+            self.read_payload_at(&mut a[..block], pos)?;
+            other.read_payload_at(&mut b[..block], pos)?;
+            if a[..block] != b[..block] {
+                return Ok(false);
+            }
+            pos += block as u64;
+        }
+        Ok(true)
+    }
+
+    /// A copy of decoded text that outlives the queue a popped record's
+    /// payload points into, within the same memory limit as any payload.
+    pub fn retained_text(&self, dir: Option<&Path>) -> io::Result<Self> {
+        if self.payload_len() > MEMORY_LIMIT as u64 {
+            let mut file = temporary_file(dir)?;
+            self.write_payload(&mut file)?;
+            let (len, ascii) = (self.payload_len(), self.is_ascii());
+            return Ok(Self::Spilled(Spilled { file, start: 0, len, raw: false, ascii }));
+        }
+        let mut bytes = Vec::with_capacity(self.payload_len() as usize);
+        self.write_payload(&mut bytes)?;
+        String::from_utf8(bytes)
+            .map(Self::Text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn spill(&mut self, dir: Option<&Path>) -> io::Result<()> {
@@ -365,6 +447,29 @@ mod tests {
                 tail.data.write_payload(&mut actual_tail).unwrap();
             }
             assert_eq!(actual_tail, expected_tail, "{encoding:?}");
+        }
+    }
+
+    #[test]
+    fn cutting_text_keeps_its_place_across_read_blocks() {
+        // 3-byte characters leave the blocks misaligned, and a 4-byte one
+        // straddles the first block's end.
+        let text = format!("{}𠀀{}{}", "漢".repeat(21845), "é".repeat(30000), "a".repeat(30000));
+        assert!(text.is_char_boundary(65535) && !text.is_char_boundary(65536));
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        for keep in [21845, 21846, 21847, 51846, 51847, 60000, 81846] {
+            let mut data = Spilled {
+                file: file.try_clone().unwrap(),
+                start: 0,
+                len: text.len() as u64,
+                raw: false,
+                ascii: false,
+            };
+            let expected: String = text.chars().take(keep).collect();
+            let source_len = expected.encode_utf16().count() as u64 * 2;
+            assert_eq!(data.cut_utf16_text(source_len).unwrap(), keep as u64);
+            assert_eq!(data.len, expected.len() as u64, "keep={keep}");
         }
     }
 

@@ -20,6 +20,7 @@
 //! U+20AC). See `is_single` for why 0x80 is nonetheless excluded here.
 
 use super::dbcs::{self, Dbcs};
+use super::ByteSource;
 use super::ResolvedFragment;
 use crate::chunk::Chunk;
 use crate::config::Config;
@@ -99,7 +100,7 @@ impl Dbcs for Gbk {
 }
 
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

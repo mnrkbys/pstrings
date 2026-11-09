@@ -1,3 +1,4 @@
+use crate::chunk::parse_size;
 use crate::encoding::InputEncoding;
 use crate::filter::{CharacterFilter, FilterSet};
 use clap::Parser;
@@ -6,7 +7,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "pstrings", version, about = "Parallel strings extractor for very large files")]
 pub struct Args {
-    /// Input file.
+    /// Input file, or - to read a stream from standard input. A stream is
+    /// read once, in order, and never written to disk; the output is the
+    /// same as for a file holding the same bytes.
     input: PathBuf,
 
     /// Omit the offset and encoding columns, printing only the matched
@@ -14,8 +17,10 @@ pub struct Args {
     #[arg(short = 's', long = "string-only", action = clap::ArgAction::SetTrue, default_value_t = false)]
     str_only: bool,
 
-    /// Output file. [default: stdout].
-    #[arg(short = 'o', long = "output")]
+    /// Output file. [default: stdout]. A path containing {encoding} is a
+    /// template: each encoding goes to its own file, named by replacing
+    /// {encoding} with its -e name, as if extracted on its own.
+    #[arg(short = 'o', long = "output", verbatim_doc_comment)]
     output: Option<PathBuf>,
 
     /// Input encoding(s). Repeat the option or comma-separate to select
@@ -98,7 +103,9 @@ pub struct Args {
 
     /// Chunk size, the unit of parallel work. Accepts K/M/G/T suffixes
     /// (binary, so 1K is 1024), or "auto" to derive one from the input
-    /// size and thread count. The last chunk may be shorter. Must be even when
+    /// size and thread count (16 MiB for standard input, where each worker
+    /// holds about one chunk in memory). The last chunk may be shorter. Must
+    /// be even when
     /// -e utf16le is selected, so a chunk boundary cannot fall inside a
     /// code unit.
     #[arg(
@@ -110,6 +117,51 @@ pub struct Args {
     )]
     chunk_size: String,
 
+    /// Start of the file range to extract, as a byte offset. Only strings
+    /// starting in the range are output, and their offsets stay relative to
+    /// the start of the file. A string that started before the range belongs
+    /// to the range before, so it is not output, even in part. To tell, up
+    /// to max(--extend-limit, 64 KiB) bytes before the offset are read, for
+    /// every encoding; CP932-like encodings need a byte that cannot be part
+    /// of a character within those bytes to find character boundaries.
+    /// Accepts decimal, 0x hexadecimal, and K/M/G/T suffixes. Must be before
+    /// the end of the file. Not available with -.
+    #[arg(long = "offset", value_parser = parse_size, verbatim_doc_comment)]
+    offset: Option<u64>,
+
+    /// Length of the file range in bytes: how much of the file the range
+    /// owns, not how much is read. A string starting in the range is read
+    /// past its end, up to --extend-limit. [default: to the end of the file]
+    /// Accepts the same forms as --offset. Must be > 0. A range running past
+    /// the end of the file stops there.
+    #[arg(long = "length", value_parser = parse_size, verbatim_doc_comment)]
+    length: Option<u64>,
+
+    /// How far past the end of a --length range a string may run. A longer
+    /// string is cut there, and --stats counts it; the rest of it is not
+    /// output by any range. What remains of a cut string is subject to
+    /// --min-length as usual, so it may not be output at all. Accepts the
+    /// same forms as --offset. [default: 64K]
+    #[arg(long = "extend-limit", value_parser = parse_size, verbatim_doc_comment)]
+    extend_limit: Option<u64>,
+
+    /// With -: declares that standard input is a series of segments, each
+    /// given by one line of this file, in order:
+    ///
+    ///   <base_offset>\t<owned_length>\t<extension_length>     (decimal)
+    ///
+    /// Standard input must hold exactly owned_length + extension_length
+    /// bytes per segment, back to back. A string is output if it starts in
+    /// the owned part, at offset base_offset + its position in the segment.
+    /// It may run into the extension, and is cut at the segment's end, which
+    /// --stats counts unless the extension is empty. What remains of a cut
+    /// string is subject to --min-length as usual. No string crosses into
+    /// the next segment. A string starting in the owned part is kept over an
+    /// overlapping UTF-16LE candidate starting in the extension. Owned parts
+    /// must be in ascending order and must not overlap.
+    #[arg(long = "segments", verbatim_doc_comment)]
+    segments: Option<PathBuf>,
+
     /// Keep intermediate chunk result files for debugging.
     #[arg(long = "keep-temp")]
     keep_temp: bool,
@@ -119,7 +171,12 @@ pub struct Args {
     temp_dir: Option<PathBuf>,
 
     /// Print processing statistics, including peak RSS. Same as -v.
-    #[arg(long = "stats")]
+    ///
+    /// cut_strings counts output strings that stopped at --extend-limit or
+    /// at the end of a segment's extension. A string ending just before the
+    /// limit by itself may be counted too, so this can be too high. Segments
+    /// with an empty extension are not counted.
+    #[arg(long = "stats", verbatim_doc_comment)]
     stats: bool,
 
     /// Print processing statistics (as --stats). Repeat (-vv) to add a
@@ -136,6 +193,22 @@ impl Args {
 
     pub fn str_only(&self) -> bool {
         self.str_only
+    }
+
+    pub fn offset(&self) -> Option<u64> {
+        self.offset
+    }
+
+    pub fn length(&self) -> Option<u64> {
+        self.length
+    }
+
+    pub fn extend_limit(&self) -> Option<u64> {
+        self.extend_limit
+    }
+
+    pub fn segments(&self) -> Option<&PathBuf> {
+        self.segments.as_ref()
     }
 
     pub fn output(&self) -> &Option<PathBuf> {

@@ -1,6 +1,5 @@
 use clap::Parser;
 use std::{
-    cmp::min,
     collections::BTreeMap,
     time::{Duration, Instant},
     fs::{File, OpenOptions},
@@ -34,7 +33,7 @@ fn validate_input_file(path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
 /// Turns raw CLI args into a validated `Config`, applying defaults (job
 /// count, chunk size, encodings) and cross-field checks (e.g. chunk size
 /// must be even when UTF-16LE is selected).
-fn build_config(args: &Args, file_len: u64) -> Result<Config, Box<dyn std::error::Error>> {
+fn build_config(args: &Args, input_len: Option<u64>) -> Result<Config, Box<dyn std::error::Error>> {
     let jobs = args
         .jobs()
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
@@ -44,7 +43,7 @@ fn build_config(args: &Args, file_len: u64) -> Result<Config, Box<dyn std::error
     }
 
     let chunk_size = if args.chunk_size().eq_ignore_ascii_case("auto") {
-        auto_chunk_size(file_len, jobs)
+        input_len.map_or(Feed::stream_chunk_size(), |len| auto_chunk_size(len, jobs))
     } else {
         let size = parse_size(&args.chunk_size())?;
 
@@ -83,7 +82,8 @@ fn build_config(args: &Args, file_len: u64) -> Result<Config, Box<dyn std::error
     ))
 }
 
-/// Installs the Ctrl+C handler and returns the shared flag it sets.
+/// Installs the handler for Ctrl+C and termination requests, and returns the
+/// shared flag it sets.
 fn install_cancel_handler() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error>> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&cancelled);
@@ -93,15 +93,61 @@ fn install_cancel_handler() -> Result<Arc<AtomicBool>, Box<dyn std::error::Error
     Ok(cancelled)
 }
 
-fn make_output_writer(input: &File, output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
+/// The placeholder that makes `-o` a template for one file per encoding.
+const ENCODING_PLACEHOLDER: &str = "{encoding}";
+
+/// The per-encoding outputs, if `-o` is a template.
+fn make_encoding_outputs(
+    input: Option<&File>,
+    output_path: &Option<PathBuf>,
+    encodings: &[InputEncoding],
+) -> io::Result<Option<OutputPerEncoding>> {
+    let Some(template) = output_path.as_ref().and_then(|path| path.to_str()) else {
+        return Ok(None);
+    };
+    if !template.contains(ENCODING_PLACEHOLDER) {
+        return Ok(None);
+    }
+    let mut outputs = std::collections::HashMap::new();
+    for encoding in encodings {
+        let path = PathBuf::from(template.replace(ENCODING_PLACEHOLDER, &encoding.cli_name()));
+        outputs.insert(*encoding, make_output_writer(input, &Some(path))?);
+    }
+    Ok(Some(OutputPerEncoding(outputs)))
+}
+
+/// How long a cancelled run gets to wind down by itself.
+const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+/// Ends the process once a cancelled run has had `CANCEL_GRACE` to stop.
+///
+/// A thread blocked reading a stalled stdin or writing to a full pipe never
+/// sees the flag, and neither read nor write can be interrupted portably. The
+/// temporary directory holds extracted strings, so it goes first.
+fn spawn_cancel_watchdog(cancelled: Arc<AtomicBool>, temp_dir: Option<PathBuf>) {
+    thread::spawn(move || {
+        while !cancelled.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(CANCEL_GRACE);
+        if let Some(temp_dir) = temp_dir {
+            let _ = std::fs::remove_dir_all(temp_dir);
+        }
+        // Nothing is printed: stderr can block as well.
+        std::process::exit(1);
+    });
+}
+
+fn make_output_writer(input: Option<&File>, output_path: &Option<PathBuf>) -> io::Result<Box<dyn Write>> {
     Ok(match output_path {
         Some(path) => {
             // Open without truncation and compare the actual handles, so aliases
             // and links cannot destroy the input before the check completes.
             let output = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
             if output.metadata()?.is_file() {
-                if same_file::Handle::from_file(input.try_clone()?)?
-                    == same_file::Handle::from_file(output.try_clone()?)?
+                if let Some(input) = input
+                    && same_file::Handle::from_file(input.try_clone()?)?
+                        == same_file::Handle::from_file(output.try_clone()?)?
                 {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput,
                         "input and output refer to the same file"));
@@ -117,18 +163,13 @@ fn make_output_writer(input: &File, output_path: &Option<PathBuf>) -> io::Result
 /// Scans every configured encoding over one chunk and merges the results
 /// into a single offset-sorted temp file.
 fn process_chunk(
-    index: u64,
-    file: &File,
-    file_len: u64,
+    work: Work,
     cfg: &Config,
     temp_dir: &Path,
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
-) -> io::Result<File> {
-    let offset = index * cfg.chunk_size();
-    let len = min(cfg.chunk_size(), file_len - offset);
-    let chunk = Chunk::new(offset, len);
-
+) -> io::Result<ChunkResult> {
+    let Work { index, source, chunk, input_len, view, ends_view } = work;
     let mut files = Vec::new();
 
     for encoding in cfg.encodings() {
@@ -142,20 +183,30 @@ fn process_chunk(
             temp_dir.join(format!("chunk-{:020}-{}.bin", index, encoding.name()))
         };
 
+        // Only `scanner::utf16le` needs the bytes past the view's stop.
+        let scan_len = if *encoding == InputEncoding::Utf16le { input_len } else { input_len.min(view.stop) };
+        if chunk.offset() >= scan_len {
+            continue;
+        }
+        let scan_chunk = Chunk::new(chunk.offset(), chunk.len().min(scan_len - chunk.offset()));
+
         let scan_started = Instant::now();
-        let (record_len, file) = scan(*encoding, file, file_len, &chunk, cfg, &path, cancelled)?;
+        let (record_len, file) = scan(*encoding, source.as_ref(), scan_len, &scan_chunk, cfg, &path, cancelled)?;
         detailed_stats.add_scan_time(*encoding, scan_started.elapsed());
         detailed_stats.add_record_count(*encoding, record_len);
 
         files.push(file);
     }
+    // A streamed chunk's bytes must not outlive its scan: results can wait a
+    // long time for the outputter.
+    drop(source);
 
     let merged_path = temp_dir.join(format!("chunk-{:020}-merged.bin", index));
     let merge_started = Instant::now();
     let merged_file = merge_chunk_encodings(files, &merged_path, cancelled, cfg)?;
     detailed_stats.add_merge(merge_started.elapsed());
 
-    Ok(merged_file)
+    Ok(ChunkResult { file: merged_file, chunk, view, ends_view })
 }
 
 // A permit survives scanning and queueing until the outputter consumes the
@@ -188,7 +239,14 @@ impl Drop for ChunkPermit {
     }
 }
 
-type ChunkResult = (u64, File, ChunkPermit);
+struct ChunkResult {
+    file: File,
+    chunk: Chunk,
+    view: View,
+    ends_view: bool,
+}
+
+type WorkerResult = (u64, ChunkResult, ChunkPermit);
 
 /// Body of one worker thread: repeatedly claims the next chunk index,
 /// processes it, and sends the merged result to the outputter. Returns as
@@ -196,14 +254,11 @@ type ChunkResult = (u64, File, ChunkPermit);
 /// gone away.
 #[allow(clippy::too_many_arguments)]
 fn worker_loop(
-    file: Arc<File>,
-    file_len: u64,
-    chunk_count: u64,
+    feed: Arc<Feed>,
     cfg: Config,
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
-    next_chunk: Arc<AtomicU64>,
-    tx: SyncSender<ChunkResult>,
+    tx: SyncSender<WorkerResult>,
     in_flight: Arc<InFlight>,
     detailed_stats: Arc<DetailedStats>,
 ) -> io::Result<()> {
@@ -215,18 +270,18 @@ fn worker_loop(
         let Some(permit) = in_flight.acquire(&cancelled) else {
             break;
         };
-        let index = next_chunk.fetch_add(1, Ordering::Relaxed);
-        if index >= chunk_count {
+        let Some(work) = feed.next()? else {
             break;
-        }
+        };
+        let index = work.index;
 
-        let merged_file = process_chunk(index, &file, file_len, &cfg, &temp_dir, &cancelled, &detailed_stats)?;
+        let result = process_chunk(work, &cfg, &temp_dir, &cancelled, &detailed_stats)?;
 
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
 
-        if tx.send((index, merged_file, permit)).is_err() {
+        if tx.send((index, result, permit)).is_err() {
             break;
         }
     }
@@ -238,25 +293,21 @@ fn worker_loop(
 /// one result channel. If a worker returns an error, it sets `cancelled` so
 /// its siblings wind down too.
 fn spawn_workers(
-    file: Arc<File>,
-    file_len: u64,
-    chunk_count: u64,
+    feed: Arc<Feed>,
     cfg: Config,
     temp_dir: PathBuf,
     cancelled: Arc<AtomicBool>,
     detailed_stats: Arc<DetailedStats>,
-) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<ChunkResult>) {
-    let next_chunk = Arc::new(AtomicU64::new(0));
+) -> (Vec<thread::JoinHandle<io::Result<()>>>, Receiver<WorkerResult>) {
     let window = cfg.jobs().saturating_mul(2);
     let in_flight = Arc::new(InFlight { available: Mutex::new(window), ready: Condvar::new() });
-    let (tx, rx): (SyncSender<ChunkResult>, Receiver<ChunkResult>) = sync_channel(window);
+    let (tx, rx): (SyncSender<WorkerResult>, Receiver<WorkerResult>) = sync_channel(window);
 
     let mut handles = Vec::with_capacity(cfg.jobs());
 
     for _ in 0..cfg.jobs() {
-        let file = Arc::clone(&file);
+        let feed = Arc::clone(&feed);
         let cancelled = Arc::clone(&cancelled);
-        let next_chunk = Arc::clone(&next_chunk);
         let in_flight = Arc::clone(&in_flight);
         let tx = tx.clone();
         let cfg = cfg.clone();
@@ -264,18 +315,16 @@ fn spawn_workers(
         let detailed_stats = Arc::clone(&detailed_stats);
 
         handles.push(thread::spawn(move || -> io::Result<()> {
-            let result = std::panic::catch_unwind(|| worker_loop(
-                file,
-                file_len,
-                chunk_count,
+            // The panic is rethrown below, so nothing observes broken state.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker_loop(
+                feed,
                 cfg,
                 temp_dir,
                 Arc::clone(&cancelled),
-                next_chunk,
                 tx,
                 in_flight,
                 detailed_stats,
-            ));
+            )));
             let result = match result {
                 Ok(result) => result,
                 Err(panic) => {
@@ -302,30 +351,37 @@ fn spawn_workers(
 /// (if any) rather than propagating it immediately, since the caller still
 /// needs to join the worker threads regardless.
 fn run_output_stage(
-    rx: Receiver<ChunkResult>,
-    chunk_count: u64,
-    file_len: u64,
+    rx: Receiver<WorkerResult>,
+    chunk_total: &AtomicU64,
     cfg: &Config,
-    output: &mut Box<dyn Write>,
+    merge_repeated_lines: bool,
+    output: &mut impl Sink,
     cancelled: &AtomicBool,
     detailed_stats: &DetailedStats,
 ) -> Option<io::Error> {
-    let mut pending_files = BTreeMap::<u64, (File, ChunkPermit)>::new();
+    let mut pending_files = BTreeMap::<u64, (ChunkResult, ChunkPermit)>::new();
     let mut next_output_chunk = 0u64;
     let mut pending_output = OutputState::new(cfg.temp_dir().clone());
+    if merge_repeated_lines {
+        pending_output.merge_repeated_lines();
+    }
     let output_started = Instant::now();
     let mut output_processing = Duration::ZERO;
     let mut output_error: Option<io::Error> = None;
 
-    while next_output_chunk < chunk_count {
+    while next_output_chunk < chunk_total.load(Ordering::SeqCst) {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
 
-        while !pending_files.contains_key(&next_output_chunk) {
+        // A stream's total is only known once it has ended, which can happen
+        // while this loop is waiting for a chunk that will never come.
+        while !pending_files.contains_key(&next_output_chunk)
+            && next_output_chunk < chunk_total.load(Ordering::SeqCst)
+        {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok((index, file, permit)) => {
-                    pending_files.insert(index, (file, permit));
+                Ok((index, result, permit)) => {
+                    pending_files.insert(index, (result, permit));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if cancelled.load(Ordering::Relaxed) {
@@ -335,7 +391,9 @@ fn run_output_stage(
                 Err(RecvTimeoutError::Disconnected) => {
                     // Cancellation can close the last sender while recv_timeout
                     // is blocked. That is normal shutdown, not a missing chunk.
-                    if cancelled.load(Ordering::SeqCst) {
+                    if cancelled.load(Ordering::SeqCst)
+                        || next_output_chunk >= chunk_total.load(Ordering::SeqCst)
+                    {
                         break;
                     }
                     output_error = Some(io::Error::new(
@@ -354,21 +412,30 @@ fn run_output_stage(
             break;
         }
 
-        let (merged_file, _permit) = pending_files.remove(&next_output_chunk).unwrap();
+        let Some((result, _permit)) = pending_files.remove(&next_output_chunk) else {
+            break;
+        };
+        pending_output.set_view(result.view);
         let output_processing_started = Instant::now();
 
         if let Err(e) = output_merged_chunk(
-            merged_file,
-            next_output_chunk * cfg.chunk_size(),
-            // The final chunk may be shorter than `chunk_size` when
-            // `file_len` isn't an exact multiple of it.
-            cfg.chunk_size().min(file_len - next_output_chunk * cfg.chunk_size()),
+            result.file,
+            result.chunk.offset(),
+            result.chunk.len(),
             &mut pending_output,
             cfg.min_cch(),
             output,
             cfg.str_only(),
             cancelled,
         ) {
+            output_error = Some(e);
+            cancelled.store(true, Ordering::SeqCst);
+            break;
+        }
+
+        if result.ends_view
+            && let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.str_only())
+        {
             output_error = Some(e);
             cancelled.store(true, Ordering::SeqCst);
             break;
@@ -403,6 +470,7 @@ fn run_output_stage(
         output_processing += output_processing_started.elapsed();
     }
 
+    detailed_stats.set_cut_strings(pending_output.cut_count());
     let output_wall = output_started.elapsed();
     detailed_stats.add_output_processing(output_processing);
     detailed_stats.add_output_wait(output_wall.saturating_sub(output_processing));
@@ -424,21 +492,22 @@ fn join_workers(handles: Vec<thread::JoinHandle<io::Result<()>>>) -> Result<(), 
 fn print_stats(
     args: &Args,
     cfg: &Config,
-    file_len: u64,
+    input_bytes: u64,
     chunk_count: u64,
     started: Instant,
     peak_rss: u64,
     detailed_stats: &DetailedStats,
 ) {
     eprintln!("stats:");
-    eprintln!("  input:       {}", format_bytes(file_len));
+    eprintln!("  input:       {}", format_bytes(input_bytes));
     eprintln!("  chunks:      {}", chunk_count);
     eprintln!("  workers:     {}", cfg.jobs());
     eprintln!("  chunk_size:  {}", format_bytes(cfg.chunk_size()));
+    eprintln!("  cut_strings: {}", detailed_stats.cut_strings());
 
     let elapsed = started.elapsed();
     let mib_per_sec = if elapsed.as_secs_f64() > 0.0 {
-        file_len as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64()
+        input_bytes as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64()
     } else {
         0.0
     };
@@ -527,23 +596,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    let file_len = validate_input_file(args.input())?;
-    let cfg = build_config(&args, file_len)?;
+    let from_stdin = args.input().as_os_str() == "-";
+    if from_stdin && (args.offset().is_some() || args.length().is_some() || args.extend_limit().is_some()) {
+        return Err("--offset, --length and --extend-limit need a file, not -".into());
+    }
+    if args.segments().is_some() && !from_stdin {
+        return Err("--segments needs - as the input".into());
+    }
+    let segments = args
+        .segments()
+        .map(|path| parse_segments(io::BufReader::new(File::open(path)?)).map_err(Box::<dyn std::error::Error>::from))
+        .transpose()?;
+    let range = if from_stdin {
+        None
+    } else {
+        let file_len = validate_input_file(args.input())?;
+        let utf16le = args.encoding().is_some_and(|e| e.contains(&InputEncoding::Utf16le));
+        let limit = args.extend_limit().unwrap_or(DEFAULT_EXTEND_LIMIT);
+        Some(plan_file_range(file_len, args.offset(), args.length(), limit, utf16le)?)
+    };
+    let cfg = build_config(&args, range.as_ref().map(|range| range.len))?;
 
     let detailed_stats = Arc::new(DetailedStats::default());
     let cancelled = install_cancel_handler()?;
 
     let temp_guard = TempDirGuard::new(cfg.temp_dir().as_deref(), cfg.keep_temp())?;
     let temp_dir = temp_guard.path().to_path_buf();
+    spawn_cancel_watchdog(Arc::clone(&cancelled), (!cfg.keep_temp()).then(|| temp_dir.clone()));
 
-    let file = Arc::new(File::open(args.input())?);
-    let mut output = make_output_writer(&file, args.output())?;
-    let chunk_count = file_len.div_ceil(cfg.chunk_size());
+    let file = range.as_ref().map(|_| File::open(args.input()).map(Arc::new)).transpose()?;
+    let mut encoding_outputs = make_encoding_outputs(file.as_deref(), args.output(), cfg.encodings())?;
+    let mut output = match encoding_outputs {
+        Some(_) => Box::new(io::sink()),
+        None => make_output_writer(file.as_deref(), args.output())?,
+    };
+    let feed = Arc::new(match (file, range) {
+        (Some(file), Some(range)) => {
+            let window = Arc::new(FileWindow { file, start: range.start });
+            Feed::file(window, range.len, cfg.chunk_size(), range.view)
+        }
+        _ => match segments {
+            Some(segments) => Feed::segmented_stream(Box::new(io::stdin()), cfg.chunk_size(), segments),
+            None => Feed::stream(Box::new(io::stdin()), cfg.chunk_size()),
+        },
+    });
 
     let (handles, rx) = spawn_workers(
-        Arc::clone(&file),
-        file_len,
-        chunk_count,
+        Arc::clone(&feed),
         cfg.clone(),
         temp_dir,
         Arc::clone(&cancelled),
@@ -556,7 +655,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.verbose() >= 2 {
         begin_emitted_counts();
     }
-    let output_error = run_output_stage(rx, chunk_count, file_len, &cfg, &mut output, &cancelled, &detailed_stats);
+    let output_error = match &mut encoding_outputs {
+        Some(outputs) => run_output_stage(rx, feed.chunk_total(), &cfg, false, outputs, &cancelled, &detailed_stats),
+        None => {
+            let merge_repeated_lines = cfg.encodings().contains(&InputEncoding::Utf16le)
+                && cfg.encodings().contains(&InputEncoding::Utf16leAscii);
+            run_output_stage(rx, feed.chunk_total(), &cfg, merge_repeated_lines, &mut output, &cancelled, &detailed_stats)
+        }
+    };
     if let Some(counts) = take_emitted_counts() {
         for (encoding, count) in counts {
             detailed_stats.add_emitted_count(encoding, count);
@@ -573,10 +679,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cancelled.load(Ordering::SeqCst) {
-        return Err("cancelled by Ctrl+C".into());
+        return Err("cancelled".into());
     }
 
     output.flush()?;
+    if let Some(outputs) = &mut encoding_outputs {
+        outputs.flush_all()?;
+    }
 
     if cfg.keep_temp() {
         let kept = temp_guard.keep()?;
@@ -585,7 +694,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let peak_rss = peak_rss_bytes();
     if args.stats() || args.verbose() > 0 {
-        print_stats(&args, &cfg, file_len, chunk_count, started, peak_rss, &detailed_stats);
+        let chunk_count = feed.chunk_total().load(Ordering::SeqCst);
+        print_stats(&args, &cfg, feed.input_bytes(), chunk_count, started, peak_rss, &detailed_stats);
     }
 
     Ok(())
@@ -619,7 +729,7 @@ mod cancellation_tests {
                 drop(tx);
             });
             let mut output: Box<dyn Write> = Box::new(io::sink());
-            let error = run_output_stage(rx, 1, 8, &config(), &mut output,
+            let error = run_output_stage(rx, &AtomicU64::new(1), &config(), false, &mut output,
                                          &cancelled, &DetailedStats::default());
             worker.join().unwrap();
             assert!(error.is_none(), "{error:?}");
@@ -632,7 +742,7 @@ mod cancellation_tests {
         drop(tx);
         let cancelled = AtomicBool::new(false);
         let mut output: Box<dyn Write> = Box::new(io::sink());
-        let error = run_output_stage(rx, 1, 8, &config(), &mut output,
+        let error = run_output_stage(rx, &AtomicU64::new(1), &config(), false, &mut output,
                                      &cancelled, &DetailedStats::default()).unwrap();
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }

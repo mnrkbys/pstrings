@@ -1,4 +1,4 @@
-use super::{emit_record, read_exact_at, READ_BUFFER_SIZE};
+use super::{ByteSource, emit_record, read_exact_at, READ_BUFFER_SIZE};
 use crate::chunk::Chunk;
 use crate::config::Config;
 use crate::encoding::InputEncoding;
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// a single sorted result. See `scan_parity` for why parity is scanned
 /// separately rather than trying to auto-detect alignment.
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
@@ -55,7 +55,7 @@ pub(crate) fn scan(
 /// low bytes would be emitted as unrelated characters, including newlines.
 /// Full UTF-16LE, including surrogate pairs, is out of scope here.
 fn scan_parity(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,

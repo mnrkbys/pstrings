@@ -9,7 +9,7 @@ use crate::record_queue::RecordQueue;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -68,6 +68,143 @@ fn note_emitted(encoding: InputEncoding) {
     }
 }
 
+/// Where output lines go, by encoding.
+pub trait Sink {
+    fn for_encoding(&mut self, encoding: InputEncoding) -> &mut dyn Write;
+    fn flush_all(&mut self) -> io::Result<()>;
+}
+
+impl<W: Write> Sink for W {
+    fn for_encoding(&mut self, _encoding: InputEncoding) -> &mut dyn Write {
+        self
+    }
+
+    fn flush_all(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
+
+/// One output per encoding, for `-o` with `{encoding}`.
+pub struct OutputPerEncoding(pub HashMap<InputEncoding, Box<dyn Write>>);
+
+impl Sink for OutputPerEncoding {
+    fn for_encoding(&mut self, encoding: InputEncoding) -> &mut dyn Write {
+        self.0.get_mut(&encoding).expect("an output for every selected encoding")
+    }
+
+    fn flush_all(&mut self) -> io::Result<()> {
+        self.0.values_mut().try_for_each(|output| output.flush())
+    }
+}
+
+/// Which of the scanned strings are output, and where. The scan reports offsets
+/// from the start of what it was given; every field but `base` uses those.
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    /// Added to a string's offset to get the offset that is printed.
+    pub base: u64,
+    /// Only strings starting in `[start, end)` are output. The bytes around
+    /// that range are context for deciding what the strings are.
+    pub start: u64,
+    pub end: u64,
+    /// Strings end here at the latest. Only `scanner::utf16le` is scanned
+    /// past it, and its strings are cut here on output.
+    pub stop: u64,
+    /// Whether `stop` can cut a string, as opposed to being the input's end.
+    pub cuts: bool,
+    /// Whether `scanner::utf16le` reads past `stop`, so that its strings show
+    /// whether they really go on.
+    pub utf16le_past_stop: bool,
+    /// Whether a candidate starting in `[start, end)` beats an overlapping
+    /// one starting elsewhere, whatever their lengths. The other candidate is
+    /// never output, so it would take the string with it. A file range does
+    /// not want this: there, a neighbouring range outputs that candidate.
+    pub owned_wins_overlap: bool,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        View {
+            base: 0,
+            start: 0,
+            end: u64::MAX,
+            stop: u64::MAX,
+            cuts: false,
+            utf16le_past_stop: false,
+            owned_wins_overlap: false,
+        }
+    }
+}
+
+impl View {
+    fn owns(&self, offset: u64) -> bool {
+        (self.start..self.end).contains(&offset)
+    }
+
+    fn reaches_stop(&self, encoding: InputEncoding, end: u64) -> bool {
+        if encoding == InputEncoding::Utf16le && self.utf16le_past_stop {
+            return end > self.stop;
+        }
+        self.cuts && end + encoding.max_char_len() > self.stop
+    }
+
+    /// Decides whether `record` is output, cutting it and moving it to its
+    /// printed offset if so. Says whether the record reached the stop.
+    fn admit(&self, record: &mut MatchRecord, min_cch: u64) -> io::Result<Option<bool>> {
+        if !self.owns(record.offset) {
+            return Ok(None);
+        }
+        let end = record.offset + record.cb;
+        if end > self.stop {
+            let RecordData::Spilled(data) = &mut record.data else {
+                unreachable!("only queued UTF-16LE records reach past the stop");
+            };
+            record.cch = data.cut_utf16_text(self.stop - record.offset)?;
+            if record.cch < min_cch {
+                return Ok(None);
+            }
+        }
+        record.offset += self.base;
+        Ok(Some(self.reaches_stop(record.encoding, end)))
+    }
+}
+
+/// Merges lines that would repeat one another. `scanner::utf16le` and
+/// `scanner::utf16le_ascii` are the two encodings sharing a label, so when
+/// both run they can print the same string at the same offset. Output is
+/// sorted by offset, so only the current offset's lines are kept.
+#[derive(Default)]
+struct SeenLines {
+    active: bool,
+    offset: u64,
+    texts: Vec<RecordData>,
+}
+
+impl SeenLines {
+    fn repeats(
+        &mut self,
+        offset: u64,
+        encoding: InputEncoding,
+        text: &RecordData,
+        dir: Option<&Path>,
+    ) -> io::Result<bool> {
+        if !self.active || !matches!(encoding, InputEncoding::Utf16le | InputEncoding::Utf16leAscii) {
+            return Ok(false);
+        }
+        if offset != self.offset {
+            self.offset = offset;
+            self.texts.clear();
+        }
+        for seen in &self.texts {
+            if seen.same_payload(text)? {
+                return Ok(true);
+            }
+        }
+        self.texts.push(text.retained_text(dir)?);
+        Ok(false)
+    }
+}
+
 /// State retained between chunks. In addition to unfinished strings, this
 /// retains complete records that must wait for an earlier string to close.
 #[derive(Default)]
@@ -77,6 +214,9 @@ pub struct OutputState {
     discard_parity: [bool; 2],
     ready: HashMap<InputEncoding, RecordQueue>,
     temp_dir: Option<PathBuf>,
+    view: View,
+    cut: u64,
+    seen: SeenLines,
 }
 
 impl OutputState {
@@ -85,6 +225,22 @@ impl OutputState {
             temp_dir,
             ..Self::default()
         }
+    }
+
+    /// Sets what the following chunks' strings are measured against.
+    pub fn set_view(&mut self, view: View) {
+        self.view = view;
+    }
+
+    /// Merges lines repeating one another. Needed when the two encodings
+    /// sharing a label go to the same output.
+    pub fn merge_repeated_lines(&mut self) {
+        self.seen.active = true;
+    }
+
+    /// How many output strings were stopped by the end of the view.
+    pub fn cut_count(&self) -> u64 {
+        self.cut
     }
 
     fn enqueue(&mut self, record: MatchRecord) -> io::Result<()> {
@@ -168,12 +324,17 @@ impl OutputState {
                     } else if b_end <= a.offset {
                         self.finish_parity(1)?;
                     } else {
-                        let prefer_a = crate::scanner::utf16le::prefer_candidate(
-                            a.flags & 8 != 0,
-                            a.cb,
-                            b.flags & 8 != 0,
-                            b.cb,
-                        );
+                        let (a_owned, b_owned) = (self.view.owns(a.offset), self.view.owns(b.offset));
+                        let prefer_a = if self.view.owned_wins_overlap && a_owned != b_owned {
+                            a_owned
+                        } else {
+                            crate::scanner::utf16le::prefer_candidate(
+                                a.flags & 8 != 0,
+                                a.cb,
+                                b.flags & 8 != 0,
+                                b.cb,
+                            )
+                        };
                         self.discard_parity[usize::from(prefer_a)] = true;
                         if a_end <= b_end {
                             self.finish_parity(0)?;
@@ -202,7 +363,8 @@ impl OutputState {
     fn emit_before(
         &mut self,
         bound: (u64, u16),
-        out: &mut impl Write,
+        min_cch: u64,
+        out: &mut impl Sink,
         str_only: bool,
     ) -> io::Result<()> {
         self.resolve_parities(bound.0)?;
@@ -211,8 +373,18 @@ impl OutputState {
         while let Some(key) = self.ready_key().filter(|key| *key < bound) {
             let encoding = InputEncoding::try_from(key.1)?;
             let queue = self.ready.get_mut(&encoding).unwrap();
-            let record = queue.pop()?;
-            write_output_record(out, &record, str_only, &mut scratch)?;
+            let mut record = queue.pop()?;
+            if let Some(reached_stop) = self.view.admit(&mut record, min_cch)?
+                && !self.seen.repeats(
+                    record.offset,
+                    record.encoding,
+                    &record.data,
+                    self.temp_dir.as_deref(),
+                )?
+            {
+                self.cut += u64::from(reached_stop);
+                write_output_record(&mut out.for_encoding(record.encoding), &record, str_only, &mut scratch)?;
+            }
             drop(record);
             queue.reset_if_empty()?;
         }
@@ -248,14 +420,14 @@ pub fn output_merged_chunk(
     chunk_len: u64,
     state: &mut OutputState,
     min_cch: u64,
-    out: &mut impl Write,
+    out: &mut impl Sink,
     str_only: bool,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
-            "cancelled by Ctrl+C",
+            "cancelled",
         ));
     }
     let mut reader = BufReader::with_capacity(READ_BUFFER_SIZE, file);
@@ -268,7 +440,7 @@ pub fn output_merged_chunk(
         if count % 4096 == 0 && cancelled.load(Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
-                "cancelled by Ctrl+C",
+                "cancelled",
             ));
         }
         let input_bound = (raw.offset, raw.encoding as u16);
@@ -285,12 +457,24 @@ pub fn output_merged_chunk(
             && input_bound < earlier
         {
             if let RecordDataRef::Text(text) = raw.data {
-                state.emit_before(input_bound, out, str_only)?;
+                state.emit_before(input_bound, min_cch, out, str_only)?;
                 if state.ready_key().is_none_or(|key| key >= input_bound) {
-                    if raw.cch >= min_cch {
+                    let offset = state.view.base + raw.offset;
+                    if raw.cch >= min_cch
+                        && state.view.owns(raw.offset)
+                        && !(state.seen.active
+                            && state.seen.repeats(
+                                offset,
+                                raw.encoding,
+                                &RecordData::Text(text.to_owned()),
+                                state.temp_dir.as_deref(),
+                            )?)
+                    {
+                        let end = raw.offset + raw.cb;
+                        state.cut += u64::from(state.view.reaches_stop(raw.encoding, end));
                         write_output_record_str(
-                            out,
-                            raw.offset,
+                            &mut out.for_encoding(raw.encoding),
+                            offset,
                             raw.encoding,
                             text,
                             str_only,
@@ -326,6 +510,7 @@ pub fn output_merged_chunk(
             .unwrap_or((u64::MAX, u16::MAX));
         state.emit_before(
             input_bound.min(previous_bound).min(state.lower_bound()),
+            min_cch,
             out,
             str_only,
         )?;
@@ -338,21 +523,66 @@ pub fn output_merged_chunk(
             state.complete(prev, min_cch)?;
         }
     }
-    state.emit_before(state.lower_bound().min((chunk_end, 0)), out, str_only)
+    state.emit_before(state.lower_bound().min((chunk_end, 0)), min_cch, out, str_only)
 }
 
 /// Finishes the final pending strings and drains all complete records in order.
 pub fn flush_pending(
     state: &mut OutputState,
     min_cch: u64,
-    out: &mut impl Write,
+    out: &mut impl Sink,
     str_only: bool,
 ) -> io::Result<()> {
     for (_, rec) in std::mem::take(&mut state.pending) {
         state.complete(rec, min_cch)?;
     }
     state.pending.clear(); // incomplete final code units have no continuation
-    state.emit_before((u64::MAX, u16::MAX), out, str_only)
+    state.emit_before((u64::MAX, u16::MAX), min_cch, out, str_only)
+}
+
+#[cfg(test)]
+mod seen_lines_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_repeating_any_earlier_line_at_its_offset_is_found() {
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let mut repeats = |offset, text: &str| {
+            let text = RecordData::Text(text.into());
+            seen.repeats(offset, InputEncoding::Utf16le, &text, None).unwrap()
+        };
+        assert!(!repeats(7, "A"));
+        assert!(!repeats(7, "B"));
+        assert!(repeats(7, "A"));
+        assert!(repeats(7, "B"));
+        assert!(!repeats(8, "A"));
+    }
+
+    #[test]
+    fn other_encodings_are_left_alone() {
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let text = RecordData::Text("A".into());
+        assert!(!seen.repeats(7, InputEncoding::Ascii, &text, None).unwrap());
+        assert!(!seen.repeats(7, InputEncoding::Ascii, &text, None).unwrap());
+    }
+
+    #[test]
+    fn long_texts_are_kept_and_compared_on_disk() {
+        let long = "A".repeat(crate::payload::MEMORY_LIMIT + 1);
+        let mut first = RecordData::Text(long.clone());
+        first.spill(None).unwrap();
+        let mut other = RecordData::Text(long.clone() + "B");
+        other.spill(None).unwrap();
+        let mut same = RecordData::Text(long.clone());
+        same.spill(None).unwrap();
+
+        let mut seen = SeenLines { active: true, ..SeenLines::default() };
+        let encoding = InputEncoding::Utf16le;
+        assert!(!seen.repeats(7, encoding, &first, None).unwrap());
+        assert!(matches!(seen.texts[0], RecordData::Spilled(_)));
+        assert!(!seen.repeats(7, encoding, &other, None).unwrap());
+        assert!(seen.repeats(7, encoding, &same, None).unwrap());
+    }
 }
 
 fn owned_from_raw_record(rec: &crate::record::RawRecord<'_>) -> MatchRecord {

@@ -7,6 +7,7 @@
 //! ASCII-overlapping trail bytes force.
 
 use super::dbcs::{self, Dbcs};
+use super::ByteSource;
 use super::ResolvedFragment;
 use crate::chunk::Chunk;
 use crate::config::Config;
@@ -97,7 +98,7 @@ impl Dbcs for Cp932 {
 }
 
 pub(crate) fn scan(
-    file: &File,
+    file: &dyn ByteSource,
     file_len: u64,
     chunk: &Chunk,
     cfg: &Config,
