@@ -17,8 +17,10 @@ lose strings, or damage the input.
 
 ### Added
 
-- `-` reads the input from standard input, including a pipe. Memory stays bounded
-  by about the number of workers times the chunk size, and the input is never
+- `-` reads the input from standard input, including a pipe. Each worker holds
+  one chunk of the input in memory while it scans it (16 MiB with the default
+  `--chunk-size auto`), so the input held at once is at most the number of
+  workers times the chunk size, however long the stream is. The input is never
   written to temporary files. The output is the same as for a file holding the
   same bytes.
 - `--offset` and `--length` extract the strings starting in a range of a file.
