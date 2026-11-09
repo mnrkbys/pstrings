@@ -1,8 +1,24 @@
 # pstrings
 
-Version 0.2.0 is a personal fork maintained by mnrkbys, based on
-[upstream pstrings v0.1.46](https://github.com/herosi/pstrings/tree/v0.1.46).
-This fork is maintained independently of the upstream project.
+This is a fork of [pstrings by herosi](https://github.com/herosi/pstrings), based on
+[upstream v0.1.46](https://github.com/herosi/pstrings/tree/v0.1.46). It is maintained
+independently by mnrkbys. Please report problems with this fork at
+[its issue tracker](https://github.com/mnrkbys/pstrings/issues), not upstream.
+
+Versions use calendar versioning, `YYYY.M.N` (for example 2026.11.0). They are a
+separate line from upstream's 0.1.x releases.
+
+The main differences from upstream (see [CHANGELOG.md](CHANGELOG.md) for all of them):
+
+- Reads the input from standard input with `-`, including a pipe
+- Extracts a range of a file (`--offset`, `--length`, `--extend-limit`), or segments
+  of standard input from unrelated places (`--segments`)
+- Writes one output file per encoding (`-o` with `{encoding}`)
+- Fixes for output order, strings lost at chunk boundaries, UTF-16LE parity, memory
+  use on long strings, and overwriting the input with the output
+
+The development of this fork is assisted by AI coding agents (Anthropic Claude
+Code and OpenAI Codex).
 
 ## pstrings - Parallel strings extractor for very large files
 
