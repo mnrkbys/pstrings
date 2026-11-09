@@ -9,6 +9,13 @@ v0.1.46.
 
 A release's date is filled in when it is tagged.
 
+## [Unreleased]
+
+### Changed
+
+- encoding_rs is updated to 0.8.44, which fixes ISO-2022-JP decoding at buffer
+  boundaries. The output of every `-e` encoding is unchanged on the test data.
+
 ## [2026.11.0] - 2026-11-09
 
 The first release of the fork. It reads from pipes, extracts parts of an input
@@ -65,4 +72,5 @@ lose strings, or damage the input.
 - With both `-e utf16le` and `-e utf16le-ascii`, lines holding only a line break
   are no longer printed, and a line both find at the same offset is printed once.
 
+[Unreleased]: https://github.com/mnrkbys/pstrings/compare/v2026.11.0...HEAD
 [2026.11.0]: https://github.com/mnrkbys/pstrings/compare/v0.1.46...v2026.11.0
