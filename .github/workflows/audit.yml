@@ -1,0 +1,29 @@
+name: Audit
+# Checks the dependencies against the RustSec advisory database, on changes and
+# every week, so a newly published advisory shows up before the next release.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit
