@@ -99,6 +99,7 @@ impl Sink for OutputPerEncoding {
 
 /// Which of the scanned strings are output, and where. The scan reports offsets
 /// from the start of what it was given; every field but `base` uses those.
+/// UTF-16LE parity is still that of the printed offset (`base` included).
 #[derive(Clone, Copy, Debug)]
 pub struct View {
     /// Added to a string's offset to get the offset that is printed.
@@ -245,7 +246,9 @@ impl OutputState {
 
     fn enqueue(&mut self, record: MatchRecord) -> io::Result<()> {
         if record.encoding == InputEncoding::Utf16le {
-            let parity = (record.offset % 2) as usize;
+            // By printed offset, so that a tie in `resolve_parities` goes to
+            // the even candidate of the whole input however it was cut.
+            let parity = ((self.view.base + record.offset) % 2) as usize;
             if self.parity[parity].is_none() {
                 self.parity[parity] = Some(RecordQueue::new(self.temp_dir.as_deref())?);
             }

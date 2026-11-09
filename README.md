@@ -166,8 +166,10 @@ it, and no string continues into the next one. The input is one line per piece,
 `<base_offset>\t<owned_length>\t<extension_length>` in decimal.
 
 In a segment a string starting in the owned part is kept over an overlapping UTF-16LE
-candidate starting in the extension, as that candidate is not output. A file range
-decides as the whole file does, since the next range outputs the candidate.
+candidate starting in the extension, as that candidate is not output. Other overlaps
+are decided as in the whole input, by the printed offsets, so where the segments
+start does not change them. A file range decides as the whole file does, since the
+next range outputs the candidate.
 
 `cut_strings` in `--stats` counts output strings that reached the limit (within one
 character of it). A string ending just before the limit by itself may be counted
@@ -323,8 +325,10 @@ Options:
           --stats counts unless the extension is empty. What remains of a cut
           string is subject to --min-length as usual. No string crosses into
           the next segment. A string starting in the owned part is kept over an
-          overlapping UTF-16LE candidate starting in the extension. Owned parts
-          must be in ascending order and must not overlap.
+          overlapping UTF-16LE candidate starting in the extension; otherwise
+          overlapping candidates are decided as in the whole input, by their
+          printed offsets. Owned parts must be in ascending order and must not
+          overlap.
 
       --keep-temp
           Keep intermediate chunk result files for debugging
