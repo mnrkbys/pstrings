@@ -290,3 +290,16 @@ fn segments_cut_where_no_string_crosses_match_the_whole_input() {
         assert_eq!(lines(&run(&shifted, &stdin, &options)), expected_shifted, "-c {chunk}");
     }
 }
+
+#[test]
+fn a_candidate_past_the_largest_offset_is_judged_without_overflow() {
+    // The candidate in the extension would print past u64::MAX; it is not
+    // output, but its parity is still decided.
+    let mut bytes = vec![0; 6];
+    bytes.extend(utf16("abcdef"));
+    bytes.extend([0; 4]);
+    let base = u64::MAX - 3;
+    let segments = format!("{base}\t2\t{}\n", bytes.len() - 2);
+    let out = run(&segments, &bytes, &["-e", "utf16le", "-m", "3"]);
+    assert_eq!(lines(&out), Vec::<String>::new());
+}

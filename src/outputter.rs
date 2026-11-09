@@ -248,7 +248,8 @@ impl OutputState {
         if record.encoding == InputEncoding::Utf16le {
             // By printed offset, so that a tie in `resolve_parities` goes to
             // the even candidate of the whole input however it was cut.
-            let parity = ((self.view.base + record.offset) % 2) as usize;
+            // XOR: the sum can overflow for a candidate that is never output.
+            let parity = ((self.view.base ^ record.offset) & 1) as usize;
             if self.parity[parity].is_none() {
                 self.parity[parity] = Some(RecordQueue::new(self.temp_dir.as_deref())?);
             }
