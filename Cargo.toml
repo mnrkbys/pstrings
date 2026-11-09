@@ -1,6 +1,6 @@
 [package]
 name = "pstrings"
-version = "0.2.0"
+version = "2026.11.0"
 edition = "2024"
 description = "Parallel strings extractor for very large files"
 
