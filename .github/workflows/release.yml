@@ -15,7 +15,7 @@ jobs:
       - name: Check release notes
         run: .github/scripts/release-notes.sh "${{ github.ref_name }}" "${{ github.repository }}" > /dev/null
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit
@@ -55,7 +55,7 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu' && startsWith(matrix.os, 'ubuntu')
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
       - name: Build
