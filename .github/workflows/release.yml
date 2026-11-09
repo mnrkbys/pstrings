@@ -100,12 +100,14 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Write release notes from CHANGELOG.md
+        run: .github/scripts/release-notes.sh "${{ github.ref_name }}" "${{ github.repository }}" > release-notes.md
       - name: Create or update release
         run: |
           if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
             gh release upload "${{ github.ref_name }}" artifacts/* --clobber
           else
-            gh release create "${{ github.ref_name }}" artifacts/* --generate-notes
+            gh release create "${{ github.ref_name }}" artifacts/* --notes-file release-notes.md
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
