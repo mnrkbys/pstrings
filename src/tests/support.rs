@@ -41,7 +41,7 @@ pub(crate) fn test_config(min_cch: u64) -> Config {
         8,
         false,
         None,
-        false,
+        crate::outputter::RecordFormat::default(),
     )
 }
 
@@ -54,7 +54,7 @@ pub(crate) fn test_config2(min_cch: u64, chunk_size: u64) -> Config {
         chunk_size,
         false,
         None,
-        false,
+        crate::outputter::RecordFormat::default(),
     )
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn test_config_with_filters(
         chunk_size,
         false,
         None,
-        false,
+        crate::outputter::RecordFormat::default(),
     )
 }
 
@@ -245,14 +245,14 @@ pub(crate) fn merge_test_encoding_chunks(files: Vec<File>, min_cch: u64) -> Stri
         // chunk length to evaluate. Hand-built fixtures don't model that
         // situation anyway, and the inferred `chunk_offset` above already
         // means this path isn't reproducing a real chunk layout.
-        output_merged_chunk(file, chunk_offset, u64::MAX, &mut pending, min_cch, &mut output, false, &cancel).unwrap();
+        output_merged_chunk(file, chunk_offset, u64::MAX, &mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default(), &cancel).unwrap();
     }
     // Delegates to `outputter::flush_pending` rather than re-implementing
     // "check cch, write" here: that logic now has to call
     // `scanner::segment_raw` to resolve any still-pending `RecordData::Raw`
     // fragment (e.g. from `scanner::cp932`) before it can even know a
     // real `cch`, so it belongs in one place, not duplicated per caller.
-    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, false).unwrap();
+    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default()).unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -271,9 +271,9 @@ pub(crate) fn merge_test_encoding_chunks_at(chunks: Vec<(u64, u64, File)>, min_c
     let mut pending = OutputState::default();
     let cancel = AtomicBool::new(false);
     for (chunk_offset, chunk_len, file) in chunks {
-        output_merged_chunk(file, chunk_offset, chunk_len, &mut pending, min_cch, &mut output, false, &cancel).unwrap();
+        output_merged_chunk(file, chunk_offset, chunk_len, &mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default(), &cancel).unwrap();
     }
-    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, false).unwrap();
+    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default()).unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -297,8 +297,8 @@ pub(crate) fn merge_test_single_chunk(paths: &[PathBuf], min_cch: u64) -> String
 
     let mut output = Vec::new();
     let mut pending = OutputState::default();
-    output_merged_chunk(merged_file, 0, u64::MAX, &mut pending, min_cch, &mut output, false, &cancel).unwrap();
-    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, false).unwrap();
+    output_merged_chunk(merged_file, 0, u64::MAX, &mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default(), &cancel).unwrap();
+    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default()).unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -354,9 +354,9 @@ pub(crate) fn merge_test_full(encoding_chunks: &[(InputEncoding, Vec<PathBuf>)],
             .map(|r| r.offset)
             .unwrap_or(index as u64 * 8);
         file.seek(io::SeekFrom::Start(0)).unwrap();
-        output_merged_chunk(file, chunk_offset, u64::MAX, &mut pending, min_cch, &mut output, false, &cancel).unwrap();
+        output_merged_chunk(file, chunk_offset, u64::MAX, &mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default(), &cancel).unwrap();
     }
-    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, false).unwrap();
+    crate::outputter::flush_pending(&mut pending, min_cch, &mut output, crate::outputter::RecordFormat::default()).unwrap();
 
     String::from_utf8(output).unwrap()
 }

@@ -157,6 +157,7 @@ pstrings -o output.txt input.bin -e cp932
 pstrings -j 8 -o output.txt input.bin
 pstrings -o output.txt --temp-dir D:\PathToSsdOrFastDrive input.bin
 pstrings -o "output-{encoding}.tsv" -e ascii,utf16le input.bin
+pstrings --line-ending lf -o output.tsv input.bin
 pstrings --offset 0x100000 --length 64M input.bin
 read_image | pstrings -
 read_regions | pstrings --segments regions.tsv -
@@ -198,6 +199,20 @@ string is subject to `--min-length` as usual.
 print is printed once when they share an output. With `{encoding}` in `-o` each
 gets its own file, which holds what that encoding gives on its own.
 
+### Line endings and reproducible output
+
+Each output line ends with `--line-ending`: `lf` (`\n`) or `crlf` (`\r\n`) on every
+platform, or `native`, the default, which is `crlf` on Windows and `lf` elsewhere.
+It applies to standard output, to `-o` files and `{encoding}` templates, and to
+`-s`; nothing else in a line changes.
+
+The same input and the same options (`-e`, `-f`, `-m`, `--offset`, `--length`,
+`--segments`, `--extend-limit` and `--line-ending`) give byte-identical output,
+whatever the thread count (`-j`), the chunk size (`-c`, including `auto`), the
+`--temp-dir`, the time, the locale, or the environment. With `--line-ending lf` or
+`crlf`, the output is also the same on every OS, so its hash can be compared
+across hosts.
+
 
 ## Arguments/Options
 
@@ -220,6 +235,18 @@ Options:
           Output file. [default: stdout]. A path containing {encoding} is a
           template: each encoding goes to its own file, named by replacing
           {encoding} with its -e name, as if extracted on its own.
+
+      --line-ending <LINE_ENDING>
+          Line ending of the output, on stdout and in every -o file.
+          
+          Only the end of each line changes; diagnostics on standard error are not affected.
+
+          Possible values:
+          - lf:     `\n` on every platform
+          - crlf:   `\r\n` on every platform
+          - native: `\r\n` on Windows, `\n` elsewhere
+          
+          [default: native]
 
   -e, --encoding <ENCODING>
           Input encoding(s), repeated or comma-separated. [default: ascii, utf16le-ascii]

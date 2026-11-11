@@ -1,6 +1,6 @@
 use super::support::*;
 use crate::encoding::InputEncoding;
-use crate::outputter::{output_merged_chunk, write_output_record};
+use crate::outputter::{output_merged_chunk, write_output_record, RecordFormat};
 use crate::record::{write_record, MatchRecord, RecordData};
 use std::fs::File;
 use std::io::{BufWriter, Seek};
@@ -42,7 +42,7 @@ fn output_encoding_field_has_no_padding() {
         data: RecordData::Text("hello".into()),
     };
     let mut scratch: Vec<u8> = Vec::with_capacity(256);
-    write_output_record(&mut out, &rec, false, &mut scratch).unwrap();
+    write_output_record(&mut out, &rec, RecordFormat::default(), &mut scratch).unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap().trim_end_matches(['\r', '\n']),
         "00000000000000000012\tASCII\thello"
@@ -74,7 +74,7 @@ fn write_output_record_offset_padding_boundaries() {
             data: RecordData::Text("x".into()),
         };
         let mut scratch: Vec<u8> = Vec::with_capacity(256);
-        write_output_record(&mut out, &rec, false, &mut scratch).unwrap();
+        write_output_record(&mut out, &rec, RecordFormat::default(), &mut scratch).unwrap();
         let text = String::from_utf8(out).unwrap();
         let offset_field = text.split('\t').next().unwrap();
         assert_eq!(offset_field, expected_offset_str, "offset={offset}");
@@ -520,7 +520,7 @@ fn output_merged_chunk_stops_when_cancelled() {
     // this also confirms the cancellation check happens before doing any
     // work, not just partway through a large input.
     let cancelled = AtomicBool::new(true);
-    let result = output_merged_chunk(input, 0, u64::MAX, &mut pending, 1, &mut output, false, &cancelled);
+    let result = output_merged_chunk(input, 0, u64::MAX, &mut pending, 1, &mut output, crate::outputter::RecordFormat::default(), &cancelled);
     assert!(result.is_err(), "should return an error when already cancelled");
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
 }

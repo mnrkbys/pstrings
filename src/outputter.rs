@@ -6,6 +6,7 @@ use crate::READ_BUFFER_SIZE;
 use crate::encoding::InputEncoding;
 use crate::record::{MatchRecord, RecordData, RecordDataRef, append_data, read_record_borrowed};
 use crate::record_queue::RecordQueue;
+use clap::ValueEnum;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -13,13 +14,36 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// The output line ending is platform-native, so the same input yields
-// byte-different output on Windows and Unix. Tests must compare against
-// `LINE_ENDING` (or split on lines) rather than hard-coding "\r\n".
-#[cfg(windows)]
-const LINE_ENDING: &str = "\r\n";
-#[cfg(not(windows))]
-const LINE_ENDING: &str = "\n";
+/// The byte sequence ending each output line (`--line-ending`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum LineEnding {
+    /// `\n` on every platform.
+    Lf,
+    /// `\r\n` on every platform.
+    Crlf,
+    /// `\r\n` on Windows, `\n` elsewhere.
+    #[default]
+    Native,
+}
+
+impl LineEnding {
+    pub fn as_bytes(self) -> &'static [u8] {
+        match self {
+            LineEnding::Lf => b"\n",
+            LineEnding::Crlf => b"\r\n",
+            LineEnding::Native if cfg!(windows) => b"\r\n",
+            LineEnding::Native => b"\n",
+        }
+    }
+}
+
+/// How each output record is serialized.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecordFormat {
+    /// Omit the offset and encoding columns (`--string-only`).
+    pub str_only: bool,
+    pub line_ending: LineEnding,
+}
 
 /// Per-encoding tally of records actually written to the final output.
 ///
@@ -369,7 +393,7 @@ impl OutputState {
         bound: (u64, u16),
         min_cch: u64,
         out: &mut impl Sink,
-        str_only: bool,
+        format: RecordFormat,
     ) -> io::Result<()> {
         self.resolve_parities(bound.0)?;
         let bound = bound.min(self.parity_bound());
@@ -387,7 +411,7 @@ impl OutputState {
                 )?
             {
                 self.cut += u64::from(reached_stop);
-                write_output_record(&mut out.for_encoding(record.encoding), &record, str_only, &mut scratch)?;
+                write_output_record(&mut out.for_encoding(record.encoding), &record, format, &mut scratch)?;
             }
             drop(record);
             queue.reset_if_empty()?;
@@ -425,7 +449,7 @@ pub fn output_merged_chunk(
     state: &mut OutputState,
     min_cch: u64,
     out: &mut impl Sink,
-    str_only: bool,
+    format: RecordFormat,
     cancelled: &AtomicBool,
 ) -> io::Result<()> {
     if cancelled.load(Ordering::Relaxed) {
@@ -461,7 +485,7 @@ pub fn output_merged_chunk(
             && input_bound < earlier
         {
             if let RecordDataRef::Text(text) = raw.data {
-                state.emit_before(input_bound, min_cch, out, str_only)?;
+                state.emit_before(input_bound, min_cch, out, format)?;
                 if state.ready_key().is_none_or(|key| key >= input_bound) {
                     let offset = state.view.base + raw.offset;
                     if raw.cch >= min_cch
@@ -481,7 +505,7 @@ pub fn output_merged_chunk(
                             offset,
                             raw.encoding,
                             text,
-                            str_only,
+                            format,
                             &mut write_scratch,
                         )?;
                     }
@@ -516,7 +540,7 @@ pub fn output_merged_chunk(
             input_bound.min(previous_bound).min(state.lower_bound()),
             min_cch,
             out,
-            str_only,
+            format,
         )?;
     }
     let chunk_end = chunk_offset.saturating_add(chunk_len);
@@ -527,7 +551,7 @@ pub fn output_merged_chunk(
             state.complete(prev, min_cch)?;
         }
     }
-    state.emit_before(state.lower_bound().min((chunk_end, 0)), min_cch, out, str_only)
+    state.emit_before(state.lower_bound().min((chunk_end, 0)), min_cch, out, format)
 }
 
 /// Finishes the final pending strings and drains all complete records in order.
@@ -535,13 +559,13 @@ pub fn flush_pending(
     state: &mut OutputState,
     min_cch: u64,
     out: &mut impl Sink,
-    str_only: bool,
+    format: RecordFormat,
 ) -> io::Result<()> {
     for (_, rec) in std::mem::take(&mut state.pending) {
         state.complete(rec, min_cch)?;
     }
     state.pending.clear(); // incomplete final code units have no continuation
-    state.emit_before((u64::MAX, u16::MAX), min_cch, out, str_only)
+    state.emit_before((u64::MAX, u16::MAX), min_cch, out, format)
 }
 
 #[cfg(test)]
@@ -680,7 +704,7 @@ fn resolve_for_output(rec: MatchRecord, min_cch: u64) -> (Vec<MatchRecord>, Opti
 /// Serializes one owned `MatchRecord` into the final output format.
 ///
 /// In normal mode the format is `<20-digit offset>\\t<encoding>\\t<data><line ending>`.
-/// With `str_only`, only the string data and line ending are emitted.
+/// With `format.str_only`, only the string data and line ending are emitted.
 ///
 /// `rec.data` must be `RecordData::Text` here -- by the time a record
 /// reaches this function it has always already been resolved (via
@@ -688,13 +712,13 @@ fn resolve_for_output(rec: MatchRecord, min_cch: u64) -> (Vec<MatchRecord>, Opti
 pub fn write_output_record(
     out: &mut impl Write,
     rec: &MatchRecord,
-    str_only: bool,
+    format: RecordFormat,
     scratch: &mut Vec<u8>,
 ) -> io::Result<()> {
     let text = match &rec.data {
         RecordData::Spilled(data) if !data.raw => {
             scratch.clear();
-            if !str_only {
+            if !format.str_only {
                 let mut number = itoa::Buffer::new();
                 let number = number.format(rec.offset);
                 scratch.resize(20usize.saturating_sub(number.len()), b'0');
@@ -705,7 +729,7 @@ pub fn write_output_record(
             }
             out.write_all(scratch)?;
             data.copy_to(out)?;
-            out.write_all(LINE_ENDING.as_bytes())?;
+            out.write_all(format.line_ending.as_bytes())?;
             note_emitted(rec.encoding);
             return Ok(());
         }
@@ -724,9 +748,9 @@ pub fn write_output_record(
     // Reuse the caller-provided buffer instead of allocating a temporary String for
     // every output record.
     scratch.clear();
-    if str_only {
+    if format.str_only {
         scratch.extend_from_slice(text.as_bytes());
-        scratch.extend_from_slice(LINE_ENDING.as_bytes());
+        scratch.extend_from_slice(format.line_ending.as_bytes());
     } else {
         // `itoa` handles integer formatting without an intermediate heap allocation.
         // The output requires a fixed-width, 20-digit decimal offset, so the missing
@@ -741,7 +765,7 @@ pub fn write_output_record(
         scratch.extend_from_slice(rec.encoding.name().as_bytes());
         scratch.push(b'\t');
         scratch.extend_from_slice(text.as_bytes());
-        scratch.extend_from_slice(LINE_ENDING.as_bytes());
+        scratch.extend_from_slice(format.line_ending.as_bytes());
     }
     note_emitted(rec.encoding);
     out.write_all(scratch)
@@ -754,13 +778,13 @@ fn write_output_record_str(
     offset: u64,
     encoding: InputEncoding,
     data: &str,
-    str_only: bool,
+    format: RecordFormat,
     scratch: &mut Vec<u8>,
 ) -> io::Result<()> {
     scratch.clear();
-    if str_only {
+    if format.str_only {
         scratch.extend_from_slice(data.as_bytes());
-        scratch.extend_from_slice(LINE_ENDING.as_bytes());
+        scratch.extend_from_slice(format.line_ending.as_bytes());
     } else {
         let mut num_buf = itoa::Buffer::new();
         let num_str = num_buf.format(offset);
@@ -772,7 +796,7 @@ fn write_output_record_str(
         scratch.extend_from_slice(encoding.name().as_bytes());
         scratch.push(b'\t');
         scratch.extend_from_slice(data.as_bytes());
-        scratch.extend_from_slice(LINE_ENDING.as_bytes());
+        scratch.extend_from_slice(format.line_ending.as_bytes());
     }
     note_emitted(encoding);
     out.write_all(scratch)

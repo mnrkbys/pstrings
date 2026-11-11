@@ -78,7 +78,10 @@ fn build_config(args: &Args, input_len: Option<u64>) -> Result<Config, Box<dyn s
         chunk_size,
         args.keep_temp(),
         args.temp_dir().clone(),
-        args.str_only(),
+        RecordFormat {
+            str_only: args.str_only(),
+            line_ending: args.line_ending(),
+        },
     ))
 }
 
@@ -425,7 +428,7 @@ fn run_output_stage(
             &mut pending_output,
             cfg.min_cch(),
             output,
-            cfg.str_only(),
+            cfg.format(),
             cancelled,
         ) {
             output_error = Some(e);
@@ -434,7 +437,7 @@ fn run_output_stage(
         }
 
         if result.ends_view
-            && let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.str_only())
+            && let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.format())
         {
             output_error = Some(e);
             cancelled.store(true, Ordering::SeqCst);
@@ -463,7 +466,7 @@ fn run_output_stage(
         //
         // `flush_pending` does the resolve-then-filter in the right order,
         // and is the same function every test helper uses.
-        if let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.str_only()) {
+        if let Err(e) = flush_pending(&mut pending_output, cfg.min_cch(), output, cfg.format()) {
             output_error = Some(e);
             cancelled.store(true, Ordering::SeqCst);
         }
@@ -714,7 +717,7 @@ mod cancellation_tests {
 
     fn config() -> Config {
         Config::new(vec![InputEncoding::Ascii], vec![CharacterFilter::Ascii],
-                    4, 1, 8, false, None, false)
+                    4, 1, 8, false, None, RecordFormat::default())
     }
 
     #[test]
