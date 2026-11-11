@@ -11,6 +11,14 @@ A release's date is filled in when it is tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `--line-ending <lf|crlf|native>` sets how each output line ends, on standard
+  output, in `-o` files and `{encoding}` templates, and with `-s`. `lf` and `crlf`
+  are the same on every platform, so the output of `--line-ending lf` is
+  byte-identical on Windows and Unix. The default, `native`, keeps the previous
+  output: `crlf` on Windows, `lf` elsewhere.
+
 ### Changed
 
 - encoding_rs is updated to 0.8.44, which fixes ISO-2022-JP decoding at buffer

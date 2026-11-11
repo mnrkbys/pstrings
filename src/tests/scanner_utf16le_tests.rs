@@ -205,7 +205,7 @@ fn cb_and_cch_account_for_astral_characters_correctly() {
         8,
         false,
         None,
-        false,
+        crate::outputter::RecordFormat::default(),
     );
     let chunk = Chunk { offset: 0, len: 12 };
     let (_records, mut result_file) =
@@ -469,7 +469,7 @@ fn astral_run_spans_multiple_read_blocks() {
         file_len,
         false,
         None,
-        false,
+        crate::outputter::RecordFormat::default(),
     );
     let (out, _out_guard) = temp_path("utf16le-astral-multiblock-output");
     let chunk = Chunk { offset: 0, len: file_len };

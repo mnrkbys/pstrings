@@ -1,6 +1,7 @@
 use crate::chunk::parse_size;
 use crate::encoding::InputEncoding;
 use crate::filter::{CharacterFilter, FilterSet};
+use crate::outputter::{LineEnding, RecordFormat};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -22,6 +23,13 @@ pub struct Args {
     /// {encoding} with its -e name, as if extracted on its own.
     #[arg(short = 'o', long = "output", verbatim_doc_comment)]
     output: Option<PathBuf>,
+
+    /// Line ending of the output, on stdout and in every -o file.
+    ///
+    /// Only the end of each line changes; diagnostics on standard error
+    /// are not affected.
+    #[arg(long = "line-ending", value_enum, default_value_t = LineEnding::Native)]
+    line_ending: LineEnding,
 
     /// Input encoding(s). Repeat the option or comma-separate to select
     /// multiple; each is scanned independently over the same input.
@@ -197,6 +205,10 @@ impl Args {
         self.str_only
     }
 
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
     pub fn offset(&self) -> Option<u64> {
         self.offset
     }
@@ -266,7 +278,7 @@ pub struct Config {
     chunk_size: u64,
     keep_temp: bool,
     temp_dir: Option<PathBuf>,
-    str_only: bool,
+    format: RecordFormat,
 }
 
 impl Config {
@@ -279,7 +291,7 @@ impl Config {
         chunk_size: u64,
         keep_temp: bool,
         temp_dir: Option<PathBuf>,
-        str_only: bool,
+        format: RecordFormat,
     ) -> Self {
         Config {
             encodings,
@@ -293,7 +305,7 @@ impl Config {
             chunk_size,
             keep_temp,
             temp_dir,
-            str_only,
+            format,
         }
     }
 
@@ -325,7 +337,7 @@ impl Config {
         &self.temp_dir
     }
 
-    pub fn str_only(&self) -> bool {
-        self.str_only
+    pub fn format(&self) -> RecordFormat {
+        self.format
     }
 }
