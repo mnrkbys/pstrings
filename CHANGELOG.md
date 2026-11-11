@@ -9,7 +9,10 @@ v0.1.46.
 
 A release's date is filled in when it is tagged.
 
-## [Unreleased]
+## [2026.11.1] - 2026-11-11
+
+Output whose bytes do not depend on the OS: `--line-ending` fixes the line ending,
+and tests pin that the output does not depend on how the work is split.
 
 ### Added
 
@@ -83,5 +86,5 @@ lose strings, or damage the input.
 - With both `-e utf16le` and `-e utf16le-ascii`, lines holding only a line break
   are no longer printed, and a line both find at the same offset is printed once.
 
-[Unreleased]: https://github.com/mnrkbys/pstrings/compare/v2026.11.0...HEAD
+[2026.11.1]: https://github.com/mnrkbys/pstrings/compare/v2026.11.0...v2026.11.1
 [2026.11.0]: https://github.com/mnrkbys/pstrings/compare/v0.1.46...v2026.11.0
