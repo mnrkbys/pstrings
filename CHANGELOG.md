@@ -18,6 +18,9 @@ A release's date is filled in when it is tagged.
   are the same on every platform, so the output of `--line-ending lf` is
   byte-identical on Windows and Unix. The default, `native`, keeps the previous
   output: `crlf` on Windows, `lf` elsewhere.
+- Tests fix that the output is byte-identical whatever `-j`, `-c` (including
+  `auto`), `--temp-dir`, the locale or the environment, for files, ranges and
+  `--segments`. This already held; it is now stated in the README.
 
 ### Changed
 
