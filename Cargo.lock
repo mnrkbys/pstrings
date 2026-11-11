@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "pstrings"
-version = "2026.11.0"
+version = "2026.11.1"
 dependencies = [
  "clap",
  "ctrlc",
